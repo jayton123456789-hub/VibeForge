@@ -1,2 +1,0 @@
-# VibeForge
-Meeting app
