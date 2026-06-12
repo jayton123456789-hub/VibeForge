@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/jayton123456789-hub/VibeForge/main/assets/LOGO.png" width="220" alt="VibeForge Logo" />
+</p>
+
 # VibeForge 🚀
 
 **Local AI Creative Session Studio**
