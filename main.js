@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { exec, spawn } = require('child_process');
@@ -27,29 +27,27 @@ const isUpdateMode = updateTargetIdx > -1;
 if (isUpdateMode) {
   const targetPath = argv[updateTargetIdx + 1];
   if (targetPath) {
-    setTimeout(() => {
+    // Async retry: the old exe may hold a file lock for a few seconds while it exits.
+    const tryReplace = async () => {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      await sleep(900);
+      const deadline = Date.now() + 15000;
+      let copied = false;
+      while (!copied && Date.now() < deadline) {
+        try {
+          fs.copyFileSync(process.execPath, targetPath);
+          copied = true;
+        } catch (e) {
+          await sleep(300);
+        }
+      }
       try {
-        let copied = false;
-        const start = Date.now();
-        const maxMs = 15000;
-        while (!copied && (Date.now() - start < maxMs)) {
-          try {
-            fs.copyFileSync(process.execPath, targetPath);
-            copied = true;
-          } catch (e) {
-            // Old process still holds file lock on Windows; short busy-wait then retry
-            const spinUntil = Date.now() + 250;
-            while (Date.now() < spinUntil) {}
-          }
-        }
-        if (!copied) {
-          try { fs.copyFileSync(process.execPath, targetPath); } catch (e) {}
-        }
         const child = spawn(targetPath, [], { detached: true, stdio: 'ignore' });
         child.unref();
       } catch (e) {}
       app.quit();
-    }, 900);
+    };
+    tryReplace();
   }
 }
 
@@ -348,6 +346,24 @@ function registerIpc() {
     return true;
   });
 
+  // All recording segments for a session (resume creates a new timestamped file each visit)
+  ipcMain.handle('get-session-recordings', (e, sessionId) => {
+    const dir = path.join(app.getPath('userData'), 'recordings', sessionId);
+    if (!fs.existsSync(dir)) return [];
+    try {
+      return fs.readdirSync(dir)
+        .filter(f => f.toLowerCase().endsWith('.webm'))
+        .map(f => {
+          const fp = path.join(dir, f);
+          const st = fs.statSync(fp);
+          return { path: fp, name: f, size: st.size, mtime: st.mtimeMs };
+        })
+        .sort((a, b) => a.mtime - b.mtime);
+    } catch (err) {
+      return [];
+    }
+  });
+
   // Decisions
   ipcMain.handle('get-decisions', (e, projectId) => {
     return db.prepare('SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at DESC').all(projectId);
@@ -604,6 +620,36 @@ function registerIpc() {
   });
 
   // For Duo/Share real link (WebSocket)
+  // NOTE: ws v8 delivers BOTH text and binary frames as Buffers — the isBinary flag is the
+  // only reliable way to tell them apart. The old Buffer.isBuffer check treated every text
+  // message as a file, which silently broke peer note-sending.
+  let pendingIncomingFile = null;
+  function handlePeerData(msg, isBinary) {
+    if (isBinary) {
+      const receivedDir = getReceivedDir();
+      const safeName = (pendingIncomingFile && pendingIncomingFile.name)
+        ? pendingIncomingFile.name.replace(/[^a-zA-Z0-9._ -]/g, '_')
+        : `received-${Date.now()}.bin`;
+      let filePath = path.join(receivedDir, safeName);
+      if (fs.existsSync(filePath)) {
+        const ext = path.extname(safeName);
+        const base = path.basename(safeName, ext);
+        filePath = path.join(receivedDir, `${base}-${Date.now()}${ext}`);
+      }
+      fs.writeFileSync(filePath, msg);
+      pendingIncomingFile = null;
+      if (mainWindow) mainWindow.webContents.send('peer-file', { path: filePath });
+    } else {
+      const text = msg.toString();
+      try {
+        const obj = JSON.parse(text);
+        if (obj && obj.type === 'file-start') { pendingIncomingFile = { name: obj.name }; return; }
+        if (obj && obj.type === 'file-end') { pendingIncomingFile = null; return; }
+      } catch (e) { /* plain text message */ }
+      if (mainWindow) mainWindow.webContents.send('peer-message', text);
+    }
+  }
+
   ipcMain.handle('duo-host', async () => {
     if (peerServer) {
       try { peerServer.close(); } catch (e) {}
@@ -614,17 +660,7 @@ function registerIpc() {
 
     peerServer.on('connection', (ws) => {
       currentPeer = { type: 'host', address: `${ip}:${port}`, ws };
-      ws.on('message', (msg) => {
-        if (Buffer.isBuffer(msg)) {
-          const receivedDir = path.join(app.getPath('userData'), 'received');
-          if (!fs.existsSync(receivedDir)) fs.mkdirSync(receivedDir, { recursive: true });
-          const filePath = path.join(receivedDir, `received-${Date.now()}.bin`);
-          fs.writeFileSync(filePath, msg);
-          if (mainWindow) mainWindow.webContents.send('peer-file', { path: filePath });
-        } else {
-          if (mainWindow) mainWindow.webContents.send('peer-message', msg.toString());
-        }
-      });
+      ws.on('message', (msg, isBinary) => handlePeerData(msg, isBinary));
       ws.on('close', () => { currentPeer = null; });
       if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'connected', address: `${ip}:${port}` });
     });
@@ -644,18 +680,7 @@ function registerIpc() {
           if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'connected', address });
           resolve({ ok: true, address });
         });
-        peerClient.on('message', (msg) => {
-          if (Buffer.isBuffer(msg)) {
-            // file chunk - save to received
-            const receivedDir = path.join(app.getPath('userData'), 'received');
-            if (!fs.existsSync(receivedDir)) fs.mkdirSync(receivedDir, { recursive: true });
-            const filePath = path.join(receivedDir, `received-${Date.now()}.bin`);
-            fs.writeFileSync(filePath, msg);
-            if (mainWindow) mainWindow.webContents.send('peer-file', { path: filePath });
-          } else {
-            if (mainWindow) mainWindow.webContents.send('peer-message', msg.toString());
-          }
-        });
+        peerClient.on('message', (msg, isBinary) => handlePeerData(msg, isBinary));
         peerClient.on('close', () => {
           currentPeer = null;
           if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'disconnected' });
@@ -966,96 +991,6 @@ function registerIpc() {
       proc.on('error', err => resolve({ code: -1, error: err.message }));
     });
   });
-  // Improved GitHub device flow so the app can show the code to the user (as seen on github.com/login/device)
-  let ghDeviceProc = null;
-
-  // Pure GitHub device flow (no 'gh' CLI required for sign-in). This shows the code in the app.
-  // User enters it on github.com/login/device , we poll and get a token, then detect if it's Jayton's account for DEV/publishing.
-  ipcMain.handle('start-github-device-signin', async () => {
-    // We return immediately; the renderer does the fetch + polling + showing code.
-    // This handler is kept for compatibility but the real flow is now in renderer.
-    return { started: true, useRendererFlow: true };
-  });
-
-  ipcMain.handle('github-poll-device-token', async (e, { device_code, client_id }) => {
-    try {
-      const res = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `client_id=${client_id}&device_code=${device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code`
-      });
-      const data = await res.json();
-      return data;
-    } catch (e) {
-      return { error: e.message };
-    }
-  });
-
-  ipcMain.handle('github-get-user-with-token', async (e, { token }) => {
-    try {
-      const res = await fetch('https://api.github.com/user', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json'
-        }
-      });
-      if (!res.ok) return { ok: false, status: res.status };
-      const user = await res.json();
-      return { ok: true, login: user.login, name: user.name };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
-  });
-
-  ipcMain.handle('github-publish-with-token', async (e, { token, owner, repo, tag, title, body, assetPath }) => {
-    try {
-      // 1. Create the release
-      const createRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          tag_name: tag,
-          name: title || `VibeForge ${tag}`,
-          body: body || 'Released from VibeForge app',
-          draft: false
-        })
-      });
-      if (!createRes.ok) {
-        const errText = await createRes.text();
-        return { ok: false, error: `Create release failed: ${createRes.status} ${errText}` };
-      }
-      const release = await createRes.json();
-
-      // 2. Upload the asset if provided
-      if (assetPath && fs.existsSync(assetPath)) {
-        const fileName = path.basename(assetPath);
-        const uploadUrl = release.upload_url.replace('{?name,label}', `?name=${encodeURIComponent(fileName)}`);
-        const buf = fs.readFileSync(assetPath);
-        const uploadRes = await fetch(uploadUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': buf.length
-          },
-          body: buf
-        });
-        if (!uploadRes.ok) {
-          const errText = await uploadRes.text();
-          return { ok: false, error: `Release created (${release.html_url}) but asset upload failed: ${uploadRes.status} ${errText}` };
-        }
-      }
-
-      return { ok: true, url: release.html_url };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
-  });
-
   // === Ollama serve (open source local AI server) ===
   ipcMain.handle('start-ollama-serve', () => {
     const cmd = getOllamaCommand();
@@ -1269,17 +1204,6 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('check-github-user', () => {
-    return new Promise((resolve) => {
-      exec('gh api user --jq .login', (err, stdout) => {
-        if (err) return resolve({ ok: false, login: null });
-        const login = (stdout || '').trim();
-        resolve({ ok: true, login });
-      });
-    });
-  });
-
-  // Legacy for compatibility
   ipcMain.handle('gh-signin', () => {
     const gh = getGhCommand();
     return new Promise((resolve) => {
@@ -1461,12 +1385,20 @@ function getLocalIP() {
 
 function createWindow() {
   if (isUpdateMode) return;
+  Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1280,
+    height: 820,
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#0a0a0b',
+    autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#070812',
+      symbolColor: '#cbd5e1',
+      height: 36
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

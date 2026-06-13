@@ -1,6 +1,17 @@
 // VibeForge - Minimal, stable, fully wired first version
 // Every button here has a real handler. No dead UI.
 
+// Escape user-entered text before interpolating into HTML templates.
+// Without this, a title like  Nick's <idea>  breaks rendering and onclick handlers.
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let currentProject = null;
 let currentView = 'sessions';
 let projects = [];
@@ -11,28 +22,18 @@ let receivedItems = [];
 async function init() {
   // Load projects
   projects = await window.vibeforge.getProjects();
-  
-  // First launch - empty, guide user
+
+  // First launch should not block the user with "create a project" admin work.
+  // Create a quiet default workspace so the app opens straight to the recording command center.
   if (projects.length === 0) {
-    document.getElementById('main-content').innerHTML = `
-      <div class="flex flex-col items-center justify-center h-full text-center">
-        <img src="../assets/LOGO.png" width="80" class="mb-6 opacity-80" onerror="this.style.display='none'">
-        <div class="text-2xl font-semibold mb-2">Welcome to VibeForge</div>
-        <div class="text-zinc-400 mb-6 max-w-xs">Local creative session studio. Create your first project to begin capturing ideas, decisions, and tasks.</div>
-        <button onclick="createFirstProject()" 
-                class="px-6 py-2.5 bg-white text-black rounded-2xl font-semibold flex items-center gap-2">
-          <i class="fa-solid fa-plus"></i> Create First Project
-        </button>
-      </div>
-    `;
-    updateProjectHeader(null);
-    return;
+    await ensureDefaultProject();
   }
 
   // Load last or first project
   currentProject = projects[0];
   updateProjectHeader(currentProject);
   await switchView('sessions');
+  setTimeout(() => maybeShowFirstRunTour(), 250);
 
   // Listen for peer updates (from main)
   if (window.vibeforge.onPeerStatus) {
@@ -83,6 +84,60 @@ async function init() {
   }
 }
 
+async function ensureDefaultProject() {
+  if (currentProject && currentProject.id) return currentProject;
+  projects = await window.vibeforge.getProjects();
+  if (projects.length) {
+    currentProject = projects[0];
+    updateProjectHeader(currentProject);
+    return currentProject;
+  }
+  const proj = await window.vibeforge.createProject('My Workspace');
+  projects = await window.vibeforge.getProjects();
+  currentProject = proj;
+  updateProjectHeader(currentProject);
+  return proj;
+}
+
+function maybeShowFirstRunTour(force = false) {
+  if (!force && localStorage.getItem('vibeforge-tour-seen') === 'true') return;
+  const modal = document.createElement('div');
+  modal.className = 'fixed inset-0 bg-black/75 z-[600] flex items-center justify-center p-6';
+  modal.innerHTML = `
+    <div class="w-full max-w-4xl rounded-[30px] border border-zinc-600 bg-[#0b0f1d] shadow-2xl shadow-black/60 overflow-hidden">
+      <div class="p-7 border-b border-zinc-800">
+        <div class="text-xs uppercase tracking-[2px] text-cyan-300 mb-2">First time tour</div>
+        <div class="text-3xl font-semibold">Record first. Organize later.</div>
+        <div class="text-zinc-400 mt-2">VibeForge is built so you do not have to type while ideas are happening. These are the buttons that matter.</div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-3 p-6">
+        <div class="rounded-2xl border border-red-500/30 bg-red-500/10 p-4"><div class="font-semibold text-red-200 mb-1"><i class="fa-solid fa-microphone mr-2"></i>Quick Record</div><div class="text-sm text-zinc-400">Starts recording immediately. Name, summarize, and sort it later.</div></div>
+        <div class="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4"><div class="font-semibold text-amber-200 mb-1"><i class="fa-solid fa-bolt mr-2"></i>Mark Moment</div><div class="text-sm text-zinc-400">Drops a timestamped task, decision, or idea without typing.</div></div>
+        <div class="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-4"><div class="font-semibold text-cyan-200 mb-1"><i class="fa-solid fa-desktop mr-2"></i>Screen / Window</div><div class="text-sm text-zinc-400">Adds video capture only when you need it.</div></div>
+        <div class="rounded-2xl border border-violet-500/30 bg-violet-500/10 p-4"><div class="font-semibold text-violet-200 mb-1"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</div><div class="text-sm text-zinc-400">After the call, use local AI to summarize, extract tasks, and name sessions.</div></div>
+      </div>
+      <div class="p-6 pt-0 flex gap-3">
+        <button class="tour-start flex-1 py-3 rounded-2xl bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold">Start Recording</button>
+        <button class="tour-close flex-1 py-3 rounded-2xl bg-white text-black font-semibold">Got it</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const close = () => {
+    localStorage.setItem('vibeforge-tour-seen', 'true');
+    modal.remove();
+  };
+  modal.querySelector('.tour-close').onclick = close;
+  modal.querySelector('.tour-start').onclick = async () => {
+    close();
+    await quickStartRecording();
+  };
+}
+
+window.showFirstRunTour = function() {
+  maybeShowFirstRunTour(true);
+};
+
 function updateProjectHeader(project) {
   const nameEl = document.getElementById('project-name');
   const metaEl = document.getElementById('project-meta');
@@ -131,7 +186,7 @@ async function showProjectMenu() {
     const active = currentProject && currentProject.id === p.id ? 'font-semibold text-white' : '';
     html += `<div onclick="switchProject('${p.id}'); this.parentNode.remove()" class="px-4 py-2 hover:bg-zinc-800 cursor-pointer flex items-center gap-2 ${active}">
       <div class="w-6 h-6 rounded bg-[#6366f1] text-[10px] flex items-center justify-center">${p.name.slice(0,2).toUpperCase()}</div>
-      <span>${p.name}</span>
+      <span>${esc(p.name)}</span>
     </div>`;
   });
 
@@ -160,7 +215,7 @@ async function showProjectMenu() {
 }
 
 async function createFirstProject() {
-  const name = await window.showInputModal('Project name', 'My First Project', 'Name for your first project');
+  const name = await window.showInputModal('Project name', '', 'Example: VibeForge, DoReMii, Client App');
   if (!name) return;
   const proj = await window.vibeforge.createProject(name);
   projects = await window.vibeforge.getProjects();
@@ -268,34 +323,244 @@ async function switchView(view) {
 // 4. SESSIONS VIEW - fully wired
 async function renderSessionsView(content, actionsEl) {
   const sessions = await window.vibeforge.getSessions(currentProject.id);
-  actionsEl.innerHTML = `
-    <button onclick="startNewSession()" class="px-4 py-1.5 bg-white text-black rounded-2xl text-sm font-semibold flex items-center gap-2"><i class="fa-solid fa-plus"></i> New Session</button>
-    <button onclick="showCaptureIdeaModal()" class="ml-2 px-4 py-1.5 bg-emerald-600 text-white rounded-2xl text-sm font-semibold flex items-center gap-2"><i class="fa-solid fa-lightbulb"></i> Capture Idea</button>
+  actionsEl.innerHTML = '';
+  const recent = sessions.slice().sort((a, b) => (b.started_at || 0) - (a.started_at || 0)).slice(0, 4);
+
+  content.innerHTML = `
+    <div class="min-h-full grid xl:grid-cols-[1fr_320px] gap-5">
+      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/80 overflow-hidden">
+        <div class="relative min-h-[440px] p-8 flex flex-col items-center justify-center text-center">
+          <div class="absolute inset-0 pointer-events-none opacity-80"
+               style="background: radial-gradient(circle at 50% 35%, rgba(99,102,241,.22), transparent 28%), radial-gradient(circle at 70% 70%, rgba(20,184,166,.16), transparent 26%);"></div>
+          <div class="relative max-w-2xl">
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-xs mb-5">
+              <i class="fa-solid fa-sparkles"></i>
+              Local AI workspace
+            </div>
+            <h1 class="text-4xl md:text-5xl font-semibold tracking-tight mb-3">Tap the mic. Name it later.</h1>
+            <p class="text-zinc-400 text-base md:text-lg mb-8">Start capturing immediately. VibeForge can auto-name, summarize, extract tasks, and sort the mess after the conversation.</p>
+
+            <button onclick="quickStartRecording()"
+                    class="mx-auto w-36 h-36 rounded-full bg-gradient-to-br from-red-400 to-red-600 glow-record flex items-center justify-center text-white group mb-7">
+              <span class="w-20 h-20 rounded-full bg-white/18 border border-white/30 flex items-center justify-center group-hover:scale-105 transition">
+                <i class="fa-solid fa-microphone text-4xl"></i>
+              </span>
+            </button>
+
+            <div class="flex flex-wrap justify-center gap-3">
+              <button onclick="startNewSession()" class="px-5 py-3 rounded-2xl bg-white text-black font-semibold flex items-center gap-2">
+                <i class="fa-solid fa-sliders"></i> Advanced Session
+              </button>
+              <button onclick="showCaptureIdeaModal()" class="px-5 py-3 rounded-2xl bg-gradient-to-r from-cyan-600 to-teal-500 text-white font-semibold flex items-center gap-2">
+                <i class="fa-solid fa-lightbulb"></i> Capture Idea
+              </button>
+              <button onclick="switchView('settings')" class="px-5 py-3 rounded-2xl bg-zinc-900 border border-zinc-700 text-zinc-200 font-semibold flex items-center gap-2">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> AI Setup
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="border-t border-zinc-800 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="font-semibold text-lg">Recent sessions</div>
+              <div class="text-xs text-zinc-500">${sessions.length} total in ${esc(currentProject.name)}</div>
+            </div>
+            <button onclick="startNewSession()" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">New</button>
+          </div>
+          ${recent.length ? `
+            <div class="grid md:grid-cols-2 gap-3">
+              ${recent.map(s => `
+                <div onclick="openSession('${s.id}')" class="card cursor-pointer rounded-2xl border border-zinc-800 bg-black/25 p-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <div class="font-medium truncate">${esc(s.title)}</div>
+                      <div class="text-xs text-zinc-500 mt-1">${formatSessionMeta(s)}</div>
+                    </div>
+                    <button onclick="event.stopImmediatePropagation(); resumeLiveSession('${s.id}')" class="px-3 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">Resume</button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div class="rounded-2xl border border-dashed border-zinc-800 p-7 text-center text-zinc-500">No sessions yet. Hit the mic and start talking.</div>
+          `}
+        </div>
+      </section>
+
+      <aside class="space-y-4">
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/80 p-5">
+          <div class="font-semibold mb-4">System readiness</div>
+          <div class="space-y-3 text-sm">
+            <div class="flex items-center justify-between"><span class="text-zinc-400">Project</span><span class="text-emerald-300">Ready</span></div>
+            <div class="flex items-center justify-between"><span class="text-zinc-400">Local AI</span><span class="text-cyan-300">Auto-checks in Settings</span></div>
+            <div class="flex items-center justify-between"><span class="text-zinc-400">Whisper</span><span class="text-cyan-300">One-click setup</span></div>
+            <div class="flex items-center justify-between"><span class="text-zinc-400">Storage</span><span class="text-emerald-300">Local only</span></div>
+          </div>
+        </div>
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/80 p-5">
+          <div class="font-semibold mb-2">Fast flow</div>
+          <div class="text-sm text-zinc-400 leading-6">Record first. Fill details later. Use AI after the call for names, summaries, tasks, decisions, and insights.</div>
+        </div>
+        <div class="rounded-[24px] border border-indigo-500/30 bg-indigo-500/10 p-5">
+          <div class="font-semibold mb-2 text-indigo-200">Next best action</div>
+          <button onclick="quickStartRecording()" class="w-full py-3 rounded-2xl bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold">
+            <i class="fa-solid fa-microphone mr-2"></i> Start Quick Recording
+          </button>
+        </div>
+      </aside>
+    </div>
   `;
 
-  let html = `<div class="mb-4"><div class="font-semibold text-xl">${currentProject.name}</div><div class="text-xs text-zinc-500">${sessions.length} sessions</div></div>`;
-
-  if (sessions.length === 0) {
-    html += `<div class="empty p-8 text-center border border-dashed border-zinc-800 rounded-3xl">No sessions yet. Click "New Session" above to start capturing.</div>`;
-  } else {
-    html += `<div class="space-y-3">`;
-    for (const s of sessions) {
-      html += `
-        <div onclick="openSession('${s.id}')" class="card bg-[#111113] border border-zinc-800 rounded-3xl p-4 cursor-pointer flex justify-between items-center">
+  /*
+  // Premium recording workspace. This block was moved into renderLiveRoom below.
+  // while keeping the existing recording, transcription, and save logic below.
+  content.innerHTML = `
+    <div class="min-h-full grid 2xl:grid-cols-[1fr_310px] gap-4">
+      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-6 overflow-hidden">
+        <div class="grid lg:grid-cols-[1fr_390px] gap-5 items-start">
           <div>
-            <div class="font-medium">${s.title}</div>
-            <div class="text-xs text-zinc-500 mt-0.5">${formatSessionMeta(s)}</div>
+            <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2"><i class="fa-solid fa-users mr-2"></i>${modeLabel}</div>
+            <div class="flex items-center gap-2 mb-3">
+              <h2 class="text-3xl font-semibold tracking-tight">${esc(session.title)}</h2>
+              <button onclick="editSessionTitle('${session.id}')" class="w-8 h-8 rounded-xl hover:bg-zinc-800 text-zinc-400"><i class="fa-solid fa-pen"></i></button>
+            </div>
+            <div class="flex items-center gap-4 text-sm mb-3">
+              <span class="text-red-400 font-semibold"><i class="fa-solid fa-circle fa-beat mr-2"></i>RECORDING</span>
+              <span class="text-zinc-400"><i class="fa-solid fa-microphone mr-2"></i><span id="capture-label">${captureLabel}</span></span>
+            </div>
+            <div id="live-timer" class="font-mono text-6xl text-red-400 tracking-tighter mb-2">00:00</div>
+            <div id="mic-status" class="hidden"></div>
+            <div class="h-7 overflow-hidden mb-5">
+              <div class="text-red-400/80 text-xs tracking-[3px] whitespace-nowrap opacity-80">••• ••••• •• ••••••• ••• •••• ••••• •• ••••••• ••• •••• ••••• •••</div>
+            </div>
           </div>
-          <div class="flex gap-2 text-xs" onclick="event.stopImmediatePropagation()">
-            <button onclick="openSession('${s.id}')" class="px-3 py-1 border border-zinc-700 rounded-2xl hover:bg-zinc-800">Open</button>
-            <button onclick="resumeLiveSession('${s.id}'); event.target.closest('.card')?.click()" class="px-2 py-1 border border-emerald-700 text-emerald-400 rounded-2xl hover:bg-emerald-900/30">Resume</button>
-            <button onclick="deleteSession('${s.id}', this)" class="px-3 py-1 border border-red-800 text-red-400 rounded-2xl hover:bg-red-950">Delete</button>
+
+          <div class="grid grid-cols-[160px_1fr] gap-4">
+            <button id="stop-btn" onclick="stopLiveRoom('${session.id}')"
+                    class="mx-auto w-40 h-40 rounded-full bg-red-500/10 border border-red-400/30 flex flex-col items-center justify-center glow-record text-red-100">
+              <span class="w-24 h-24 rounded-full bg-gradient-to-br from-red-300 to-red-600 flex items-center justify-center shadow-2xl shadow-red-500/30">
+                <i class="fa-solid fa-square text-3xl"></i>
+              </span>
+              <span class="mt-3 text-xs font-semibold text-red-300">Stop &amp; Save</span>
+            </button>
+
+            <div class="space-y-3">
+              <div class="grid grid-cols-2 gap-2">
+                <button onclick="pickScreenForLive()" class="rounded-2xl border border-red-400/40 bg-red-500/10 p-4 text-center text-sm text-red-100">
+                  <i class="fa-solid fa-desktop text-xl mb-2"></i><br>Screen
+                </button>
+                <button onclick="pickScreenForLive()" class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4 text-center text-sm text-zinc-300">
+                  <i class="fa-regular fa-window-maximize text-xl mb-2"></i><br>Window
+                </button>
+              </div>
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4">
+                <div class="flex justify-between text-sm mb-2">
+                  <span class="text-zinc-300"><i class="fa-solid fa-microphone mr-2"></i>Mic input</span>
+                  <span id="mic-status-text" class="text-emerald-300">Good</span>
+                </div>
+                <canvas id="mic-meter" width="260" height="24" class="w-full h-6 rounded bg-black/50"></canvas>
+              </div>
+            </div>
           </div>
-        </div>`;
-    }
-    html += `</div>`;
-  }
-  content.innerHTML = html;
+        </div>
+
+        <textarea id="live-notes" style="display:none">${esc(notes)}</textarea>
+
+        <div class="mt-5 rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2">
+          <button onclick="openNotesEditor('${session.id}')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
+            <i class="fa-solid fa-sticky-note"></i> Notes <span id="notes-count" class="text-xs px-2 py-0.5 rounded-full bg-zinc-700">${(notes || '').length}</span>
+          </button>
+          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
+            <i class="fa-solid fa-bolt"></i> Quick Actions
+          </button>
+          <button class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Transcript
+          </button>
+          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
+            <i class="fa-solid fa-sparkles"></i> Highlights
+          </button>
+        </div>
+
+        <div class="mt-4 rounded-[24px] border border-zinc-700/70 bg-black/25 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <div class="font-semibold text-lg">Live Transcript <span class="text-xs text-emerald-300 ml-2">• Live</span></div>
+              <div class="text-sm text-zinc-500">Local Whisper types as you talk and saves into the session.</div>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-zinc-400">
+              <span>Auto-save</span>
+              <span class="w-9 h-5 rounded-full bg-cyan-500/80 relative inline-block"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
+            </div>
+          </div>
+          <div id="live-transcript" class="min-h-[210px] max-h-[310px] overflow-auto text-sm leading-7 font-mono whitespace-pre-wrap text-zinc-300"></div>
+          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">•••• ••••••• •••• ••••• ••• ••••••• •••• ••••• ••• ••••••• ••••</div>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-5 gap-3">
+          <button onclick="generateFromSession('${session.id}', 'summary', this)" class="py-3 rounded-2xl border border-violet-500/40 bg-violet-500/10 text-violet-200 font-medium"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>Summarize</button>
+          <button onclick="generateFromSession('${session.id}', 'tasks', this)" class="py-3 rounded-2xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-medium"><i class="fa-regular fa-square-check mr-2"></i>Extract Tasks</button>
+          <button onclick="generateFromSession('${session.id}', 'decisions', this)" class="py-3 rounded-2xl border border-blue-500/40 bg-blue-500/10 text-blue-200 font-medium"><i class="fa-regular fa-gem mr-2"></i>Decision</button>
+          <button onclick="window.quickMark('${session.id}', 'idea')" class="py-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-medium"><i class="fa-regular fa-lightbulb mr-2"></i>Insight</button>
+          <button onclick="showCaptureIdeaModal()" class="py-3 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 font-medium"><i class="fa-solid fa-share-nodes mr-2"></i>Clip</button>
+        </div>
+
+        <div class="mt-5 rounded-[26px] border border-red-400/40 bg-[#121522]/95 p-4 grid md:grid-cols-[220px_1fr_150px_130px_160px] gap-4 items-center shadow-2xl shadow-black/30">
+          <div class="flex items-center gap-3">
+            <button onclick="stopLiveRoom('${session.id}')" class="w-16 h-16 rounded-full bg-red-500 glow-record flex items-center justify-center"><i class="fa-solid fa-square"></i></button>
+            <div>
+              <div class="text-red-300 font-semibold">RECORDING</div>
+              <div class="text-xs text-zinc-400"><i class="fa-solid fa-microphone mr-1"></i><span id="bottom-capture-label">${captureLabel}</span></div>
+            </div>
+          </div>
+          <div class="text-center">
+            <div class="text-2xl font-mono text-zinc-100" id="bottom-live-timer">00:00</div>
+            <div class="text-xs text-zinc-500">Elapsed time</div>
+          </div>
+          <div class="text-sm text-zinc-300"><i class="fa-solid fa-desktop mr-2"></i>Screen + Mic</div>
+          <div class="text-emerald-300 text-sm"><i class="fa-solid fa-signal mr-2"></i>Good</div>
+          <button onclick="stopLiveRoom('${session.id}')" class="py-3 rounded-2xl bg-zinc-900 border border-zinc-700 font-semibold"><i class="fa-solid fa-pause mr-2"></i>Pause</button>
+        </div>
+      </section>
+
+      <aside class="space-y-4">
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
+          <div class="font-semibold mb-4">Session Overview</div>
+          <div class="space-y-4 text-sm">
+            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-clock mr-2"></i>Duration</span><span id="side-live-timer" class="text-red-300 font-mono">00:00</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-calendar mr-2"></i>Started</span><span>${new Date(session.started_at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-solid fa-tag mr-2"></i>Type</span><span>${modeLabel}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-circle mr-2"></i>Status</span><span class="text-red-300">Recording</span></div>
+          </div>
+        </div>
+
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
+          <div class="font-semibold mb-3">Capture Source</div>
+          <div class="text-cyan-300 text-lg font-semibold"><i class="fa-solid fa-display mr-2"></i><span id="source-card-label">${captureLabel}</span></div>
+          <div class="text-xs text-zinc-500 mt-2">Pick a screen or window when you want video.</div>
+        </div>
+
+        <div class="rounded-[24px] border border-cyan-500/30 bg-cyan-500/10 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <div class="font-semibold"><i class="fa-solid fa-sparkles text-violet-300 mr-2"></i>AI Assistant</div>
+            <span class="text-xs text-emerald-300 border border-emerald-500/40 px-2 py-1 rounded-full">Active</span>
+          </div>
+          <div class="text-sm text-zinc-400 mb-4">Transcribing, detecting insights, and preparing summaries.</div>
+          <div class="h-1 rounded-full bg-zinc-800 overflow-hidden"><div class="h-full w-2/3 bg-gradient-to-r from-cyan-400 to-emerald-400"></div></div>
+        </div>
+
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
+          <div class="font-semibold mb-4">Detected Insights</div>
+          <div class="space-y-2 text-sm">
+            <div class="rounded-xl border border-zinc-700 bg-zinc-900/70 p-3 text-zinc-400">Insights appear as you mark ideas, tasks, and decisions.</div>
+            <button onclick="showQuickActionsMenu('${session.id}', this)" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700">Open Quick Actions <i class="fa-solid fa-arrow-right ml-2"></i></button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  `;
+  */
 }
 
 async function deleteSession(id, btn) {
@@ -303,6 +568,27 @@ async function deleteSession(id, btn) {
   await window.vibeforge.deleteSession(id);
   await switchView('sessions');
 }
+
+window.quickStartRecording = async function() {
+  try {
+    await ensureDefaultProject();
+    const stamp = new Date().toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+    const session = await window.vibeforge.createSession({
+      projectId: currentProject.id,
+      title: `Quick Record ${stamp}`,
+      mode: 'room'
+    });
+    showToast('Quick recording started. Name it later.');
+    await renderLiveRoom(session);
+  } catch (e) {
+    showToast('Could not start quick recording: ' + (e.message || e));
+  }
+};
 
 async function openSession(id) {
   const sessions = await window.vibeforge.getSessions(currentProject.id);
@@ -320,12 +606,12 @@ async function openSession(id) {
       <div class="flex justify-between items-center mb-4">
         <button onclick="switchView('sessions')" class="text-xs text-zinc-400 hover:text-zinc-200">← Back to Sessions</button>
         <div class="flex gap-2">
-          <button onclick="editSessionTitle('${s.id}', '${s.title.replace(/'/g, "\\'")}')" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl hover:bg-zinc-800">Edit Name</button>
+          <button onclick="editSessionTitle('${s.id}')" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl hover:bg-zinc-800">Edit Name</button>
           <button onclick="deleteSessionFromDetail('${s.id}')" class="px-3 py-1 text-xs border border-red-700 text-red-400 rounded-2xl hover:bg-red-950">Delete Session</button>
         </div>
       </div>
 
-      <div class="text-2xl font-semibold">${s.title}</div>
+      <div class="text-2xl font-semibold">${esc(s.title)}</div>
       <div class="text-xs text-zinc-500 mb-2">${formatSessionMeta(s)}</div>
 
       <div class="mb-4 p-3 bg-emerald-900/30 border border-emerald-700/60 rounded-2xl">
@@ -343,7 +629,7 @@ async function openSession(id) {
 
       <div class="mb-6">
         <div class="font-medium mb-1.5">Session Notes</div>
-        <textarea id="sess-notes" class="w-full h-28 bg-[#111113] border border-zinc-800 rounded-2xl p-4 text-sm">${s.notes || ''}</textarea>
+        <textarea id="sess-notes" class="w-full h-28 bg-[#111113] border border-zinc-800 rounded-2xl p-4 text-sm">${esc(s.notes || '')}</textarea>
         <button onclick="saveSessionNotes('${s.id}')" class="mt-2 px-4 py-1 text-xs bg-white text-black rounded-2xl">Save Notes</button>
       </div>
 
@@ -388,26 +674,29 @@ async function openSession(id) {
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <div>
           <div class="font-medium mb-2">Linked Decisions (${decisions.length})</div>
-          ${decisions.length ? decisions.map(d => `<div class="text-sm py-1 border-b border-zinc-800">${d.title} <span class="text-xs text-zinc-500">[${d.status}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+          ${decisions.length ? decisions.map(d => `<div class="text-sm py-1 border-b border-zinc-800">${esc(d.title)} <span class="text-xs text-zinc-500">[${esc(d.status)}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
         </div>
         <div>
           <div class="font-medium mb-2">Linked Tasks (${tasks.length})</div>
-          ${tasks.length ? tasks.map(t => `<div class="text-sm py-1 border-b border-zinc-800">${t.title} <span class="text-xs text-zinc-500">[${t.status}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+          ${tasks.length ? tasks.map(t => `<div class="text-sm py-1 border-b border-zinc-800">${esc(t.title)} <span class="text-xs text-zinc-500">[${esc(t.status)}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
         </div>
         <div>
           <div class="font-medium mb-2">Linked Ideas (${ideas.length})</div>
-          ${ideas.length ? ideas.map(i => `<div class="text-sm py-1 border-b border-zinc-800">${i.title}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+          ${ideas.length ? ideas.map(i => `<div class="text-sm py-1 border-b border-zinc-800">${esc(i.title)}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
         </div>
         <div>
           <div class="font-medium mb-2">Timeline Events (${timeline.length})</div>
-          ${timeline.length ? timeline.map(e => `<div class="text-xs py-0.5">${new Date(e.timestamp).toLocaleTimeString()} - ${e.type}: ${e.title}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+          ${timeline.length ? timeline.map(e => `<div class="text-xs py-0.5">${new Date(e.timestamp).toLocaleTimeString()} - ${esc(e.type)}: ${esc(e.title)}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
         </div>
       </div>
     </div>
   `;
 }
 
-async function editSessionTitle(id, currentTitle) {
+async function editSessionTitle(id) {
+  const sessions = await window.vibeforge.getSessions(currentProject.id);
+  const s = sessions.find(x => x.id === id);
+  const currentTitle = s ? s.title : '';
   const newTitle = await window.showInputModal('New session name', currentTitle, 'Rename this session');
   if (!newTitle || newTitle === currentTitle) return;
   await window.vibeforge.updateSessionTitle(id, newTitle);
@@ -476,7 +765,7 @@ window.openNotesEditor = function(sessionId) {
         <div class="font-semibold text-lg">Edit Session Notes</div>
         <button class="text-zinc-400 hover:text-white text-xl leading-none close-btn">&times;</button>
       </div>
-      <textarea class="notes-ta w-full h-64 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 text-sm" placeholder="Keep the convo going... decisions, ideas, thoughts...">${current}</textarea>
+      <textarea class="notes-ta w-full h-64 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 text-sm" placeholder="Keep the convo going... decisions, ideas, thoughts...">${esc(current)}</textarea>
       <div class="flex gap-3 mt-6">
         <button class="cancel-btn flex-1 py-2.5 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium">Cancel</button>
         <button class="save-btn flex-1 py-2.5 rounded-2xl bg-white text-black font-semibold text-sm">Save Notes</button>
@@ -702,10 +991,13 @@ window.showInputModal = function(title, defaultValue = '', hint = '') {
     modal.classList.remove('hidden');
     modal.classList.add('flex');
 
-    setTimeout(() => {
-      input.focus();
-      if (defaultValue) input.select();
-    }, 30);
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        input.focus({ preventScroll: true });
+        if (defaultValue) input.select();
+        else input.setSelectionRange(input.value.length, input.value.length);
+      }, 40);
+    });
 
     const okBtn = document.getElementById('input-modal-ok-btn');
 
@@ -755,10 +1047,11 @@ window.hideInputModal = function() {
 
 window.confirmNewSession = async function() {
   try {
-    const name = document.getElementById('session-name').value.trim();
+    const rawName = document.getElementById('session-name').value.trim();
     const modeRadio = document.querySelector('input[name="mode"]:checked');
     const mode = modeRadio ? modeRadio.value : 'room';
-    if (!name) { alert('Session name is required'); return; }
+    const fallbackName = `Session ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+    const name = rawName || fallbackName;
     if (!currentProject || !currentProject.id) {
       showToast('No project selected — creating one first...');
       await createFirstProject();
@@ -781,7 +1074,7 @@ window.confirmNewSession = async function() {
   }
 };
 
-// 6. Room Mode - real live session with prominent "UR RECORDING" overlay, screen/window picker, live typewriter transcript
+// 6. Room Mode - real live session with premium recording workspace, screen/window picker, live transcript
 async function renderLiveRoom(session) {
   const content = document.getElementById('main-content');
   let timerInterval;
@@ -810,7 +1103,7 @@ async function renderLiveRoom(session) {
     <div class="max-w-3xl">
       <div class="flex justify-between mb-3">
         <div>
-          <div class="font-semibold text-lg">${session.title} <span class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">${modeLabel}</span></div>
+          <div class="font-semibold text-lg">${esc(session.title)} <span class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">${modeLabel}</span></div>
           <div id="live-timer" class="font-mono text-4xl text-red-500 tracking-tighter">00:00</div>
           <div id="mic-status" class="text-xs text-zinc-500 mt-0.5"></div>
         </div>
@@ -833,7 +1126,7 @@ async function renderLiveRoom(session) {
       ` : ''}
 
       <!-- Hidden live-notes for compatibility with stop/save logic -->
-      <textarea id="live-notes" style="display:none">${notes}</textarea>
+      <textarea id="live-notes" style="display:none">${esc(notes)}</textarea>
 
       <div class="mb-3 flex gap-2">
         <button onclick="openNotesEditor('${session.id}')" class="flex-1 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-2xl text-sm flex items-center justify-center gap-2">
@@ -867,22 +1160,133 @@ async function renderLiveRoom(session) {
     </div>
   `;
 
+  content.innerHTML = `
+    <div class="min-h-full grid 2xl:grid-cols-[1fr_300px] gap-4">
+      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-6 overflow-hidden">
+        <div class="grid 2xl:grid-cols-[1fr_360px] gap-5">
+          <div>
+            <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2"><i class="fa-solid fa-users mr-2"></i>${modeLabel}</div>
+            <div class="flex items-center gap-2 mb-3">
+              <h2 class="text-3xl font-semibold tracking-tight truncate">${esc(session.title)}</h2>
+              <button onclick="editSessionTitle('${session.id}')" class="w-8 h-8 rounded-xl hover:bg-zinc-800 text-zinc-400"><i class="fa-solid fa-pen"></i></button>
+            </div>
+            <div class="flex items-center gap-4 text-sm mb-3">
+              <span class="text-red-400 font-semibold"><i class="fa-solid fa-circle fa-beat mr-2"></i>RECORDING</span>
+              <span class="text-zinc-400"><i class="fa-solid fa-microphone mr-2"></i><span id="capture-label">${captureLabel}</span></span>
+            </div>
+            <div id="live-timer" class="font-mono text-6xl text-red-400 tracking-tighter mb-2">00:00</div>
+            <div id="mic-status" class="hidden"></div>
+            <div class="h-7 overflow-hidden mb-4 text-red-400/80 text-xs tracking-[3px] whitespace-nowrap">••• ••••• •• ••••••• ••• •••• ••••• •• ••••••• ••• ••••</div>
+          </div>
+
+          <div class="grid sm:grid-cols-[128px_1fr] gap-4">
+            <button id="stop-btn" onclick="stopLiveRoom('${session.id}')" class="w-32 h-32 rounded-full bg-red-500/10 border border-red-400/30 flex flex-col items-center justify-center glow-record text-red-100">
+              <span class="w-20 h-20 rounded-full bg-gradient-to-br from-red-300 to-red-600 flex items-center justify-center shadow-2xl shadow-red-500/30">
+                <i class="fa-solid fa-square text-2xl"></i>
+              </span>
+              <span class="mt-2 text-[11px] font-semibold text-red-300">Stop &amp; Save</span>
+            </button>
+            <div class="space-y-3">
+              <div class="grid grid-cols-2 gap-2">
+                <button onclick="pickScreenForLive()" class="rounded-2xl border border-red-400/40 bg-red-500/10 p-4 text-center text-sm text-red-100"><i class="fa-solid fa-desktop text-xl mb-2"></i><br>Screen</button>
+                <button onclick="pickScreenForLive()" class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4 text-center text-sm text-zinc-300"><i class="fa-regular fa-window-maximize text-xl mb-2"></i><br>Window</button>
+              </div>
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4">
+                <div class="flex justify-between text-sm mb-2"><span class="text-zinc-300"><i class="fa-solid fa-microphone mr-2"></i>Mic input</span><span id="mic-status-text" class="text-emerald-300">Good</span></div>
+                <canvas id="mic-meter" width="260" height="24" class="w-full h-6 rounded bg-black/50"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <textarea id="live-notes" style="display:none">${esc(notes)}</textarea>
+
+        <div class="mt-5 rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2">
+          <button onclick="openNotesEditor('${session.id}')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sticky-note"></i> Notes <span id="notes-count" class="text-xs px-2 py-0.5 rounded-full bg-zinc-700">${(notes || '').length}</span></button>
+          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-bolt"></i> Quick Actions</button>
+          <button class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-wand-magic-sparkles"></i> Transcript</button>
+          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Highlights</button>
+        </div>
+
+        <div class="mt-4 rounded-[24px] border border-zinc-700/70 bg-black/25 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <div class="font-semibold text-lg">Live Transcript <span class="text-xs text-emerald-300 ml-2">• Live</span></div>
+              <div class="text-sm text-zinc-500">Local Whisper types as you talk and saves into the session.</div>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-zinc-400"><span>Auto-save</span><span class="w-9 h-5 rounded-full bg-cyan-500/80 relative inline-block"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span></div>
+          </div>
+          <div id="live-transcript" class="min-h-[190px] max-h-[280px] overflow-auto text-sm leading-7 font-mono whitespace-pre-wrap text-zinc-300"></div>
+          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">•••• ••••••• •••• ••••• ••• ••••••• •••• ••••• •••</div>
+        </div>
+
+        <div class="mt-4 grid md:grid-cols-5 gap-3">
+          <button onclick="markMoment('${session.id}', 'idea')" class="py-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-medium"><i class="fa-regular fa-lightbulb mr-2"></i>Mark Idea</button>
+          <button onclick="markMoment('${session.id}', 'task')" class="py-3 rounded-2xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-medium"><i class="fa-regular fa-square-check mr-2"></i>Mark Task</button>
+          <button onclick="markMoment('${session.id}', 'decision')" class="py-3 rounded-2xl border border-blue-500/40 bg-blue-500/10 text-blue-200 font-medium"><i class="fa-regular fa-gem mr-2"></i>Decision</button>
+          <button onclick="clipMoment('${session.id}')" class="py-3 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 font-medium"><i class="fa-solid fa-scissors mr-2"></i>Clip</button>
+          <button onclick="generateFromSession('${session.id}', 'summary', this)" class="py-3 rounded-2xl border border-violet-500/40 bg-violet-500/10 text-violet-200 font-medium"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</button>
+        </div>
+
+        <div class="mt-5 rounded-[26px] border border-red-400/40 bg-[#121522]/95 p-4 grid xl:grid-cols-[210px_1fr_140px_110px_140px] gap-4 items-center shadow-2xl shadow-black/30">
+          <div class="flex items-center gap-3"><button onclick="stopLiveRoom('${session.id}')" class="w-16 h-16 rounded-full bg-red-500 glow-record flex items-center justify-center"><i class="fa-solid fa-square"></i></button><div><div class="text-red-300 font-semibold">RECORDING</div><div class="text-xs text-zinc-400"><i class="fa-solid fa-microphone mr-1"></i><span id="bottom-capture-label">${captureLabel}</span></div></div></div>
+          <div class="text-center"><div class="text-2xl font-mono text-zinc-100" id="bottom-live-timer">00:00</div><div class="text-xs text-zinc-500">Elapsed time</div></div>
+          <div class="text-sm text-zinc-300"><i class="fa-solid fa-desktop mr-2"></i>Screen + Mic</div>
+          <div class="text-emerald-300 text-sm"><i class="fa-solid fa-signal mr-2"></i>Good</div>
+          <button onclick="pickScreenForLive()" class="py-3 rounded-2xl bg-zinc-900 border border-zinc-700 font-semibold">Screen</button>
+        </div>
+      </section>
+
+      <aside class="space-y-4">
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-4">Session Overview</div>
+          <div class="space-y-4 text-sm">
+            <div class="flex justify-between"><span class="text-zinc-400">Duration</span><span id="side-live-timer" class="text-red-300 font-mono">00:00</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Started</span><span>${new Date(session.started_at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Type</span><span>${modeLabel}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Status</span><span class="text-red-300">Recording</span></div>
+          </div>
+        </div>
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-3">Capture Source</div>
+          <div class="text-cyan-300 text-lg font-semibold"><i class="fa-solid fa-display mr-2"></i><span id="source-card-label">${captureLabel}</span></div>
+          <div class="text-xs text-zinc-500 mt-2">Pick a screen or window when you want video.</div>
+        </div>
+        <div class="rounded-[24px] border border-cyan-500/30 bg-cyan-500/10 p-5">
+          <div class="flex items-center justify-between mb-3"><div class="font-semibold">AI Assistant</div><span class="text-xs text-emerald-300 border border-emerald-500/40 px-2 py-1 rounded-full">Active</span></div>
+          <div class="text-sm text-zinc-400 mb-4">Transcribing, detecting insights, and preparing summaries.</div>
+          <div class="h-1 rounded-full bg-zinc-800 overflow-hidden"><div class="h-full w-2/3 bg-gradient-to-r from-cyan-400 to-emerald-400"></div></div>
+        </div>
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-4">Detected Insights</div>
+          <div class="space-y-2 text-sm">
+            <div class="rounded-xl border border-zinc-700 bg-zinc-900/70 p-3 text-zinc-400">Insights appear as you mark ideas, tasks, and decisions.</div>
+            <button onclick="showQuickActionsMenu('${session.id}', this)" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700">Open Quick Actions</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  `;
+
   // Timer (always)
   const start = Date.now();
   timerInterval = setInterval(() => {
-    const el = document.getElementById('live-timer');
-    if (el) {
-      const sec = Math.floor((Date.now() - start) / 1000);
-      el.textContent = `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
-    }
+    const sec = Math.floor((Date.now() - start) / 1000);
+    const text = `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
+    ['live-timer', 'bottom-live-timer', 'side-live-timer'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    });
   }, 1000);
 
   function updateCaptureUI(label) {
     captureLabel = label || captureLabel;
     const lab = document.getElementById('capture-label');
     if (lab) lab.textContent = captureLabel;
-    const ov = document.getElementById('overlay-capture');
-    if (ov) ov.textContent = captureLabel;
+    const bottom = document.getElementById('bottom-capture-label');
+    if (bottom) bottom.textContent = captureLabel;
+    const sourceCard = document.getElementById('source-card-label');
+    if (sourceCard) sourceCard.textContent = captureLabel;
   }
 
   // === Hoist window handlers synchronously right after DOM injection + timer (before any await getUserMedia / permission dialogs).
@@ -950,10 +1354,6 @@ async function renderLiveRoom(session) {
     try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch(e){}
     try { if (displayStream) displayStream.getTracks().forEach(t => t.stop()); } catch(e){}
 
-    // remove floating overlay
-    const ov = document.getElementById('rec-overlay');
-    if (ov) ov.remove();
-
     // save notes + live transcript (if any)
     let finalNotes = (document.getElementById('live-notes') || {}).value || notes;
     if (liveTranscript && liveTranscript.trim()) {
@@ -995,6 +1395,36 @@ async function renderLiveRoom(session) {
     showToast(`${type} added`);
   };
 
+  window.markMoment = async function(id, type) {
+    const ts = document.getElementById('live-timer')?.textContent || new Date().toLocaleTimeString();
+    const title = `${type === 'idea' ? 'Idea' : type === 'task' ? 'Task' : 'Decision'} @ ${ts}`;
+    if (type === 'decision') {
+      await window.vibeforge.addDecision({ projectId: currentProject.id, sessionId: id, title, notes: `Marked during recording at ${ts}` });
+    } else if (type === 'task') {
+      await window.vibeforge.addTask({ projectId: currentProject.id, sessionId: id, title, notes: `Marked during recording at ${ts}` });
+    } else {
+      const created = await window.vibeforge.addIdea({ projectId: currentProject.id, sessionId: id, title, description: `Marked during recording at ${ts}` });
+      if (created && created.id) await window.vibeforge.updateIdea({ id: created.id, status: 'Inbox' });
+    }
+    const ta = document.getElementById('live-notes');
+    if (ta) ta.value += `${ta.value ? '\n' : ''}[${ts}] Marked ${type}: ${title}`;
+    showToast(`Marked ${type} at ${ts}`);
+  };
+
+  window.clipMoment = async function(id) {
+    const ts = document.getElementById('live-timer')?.textContent || new Date().toLocaleTimeString();
+    const ta = document.getElementById('live-notes');
+    if (ta) ta.value += `${ta.value ? '\n' : ''}[${ts}] Clip this moment`;
+    const created = await window.vibeforge.addIdea({
+      projectId: currentProject.id,
+      sessionId: id,
+      title: `Clip @ ${ts}`,
+      description: `Review this moment from the recording at ${ts}.`
+    });
+    if (created && created.id) await window.vibeforge.updateIdea({ id: created.id, status: 'Inbox' });
+    showToast(`Clip marked at ${ts}`);
+  };
+
   window.addQuickNote = async function(id) {
     const n = await window.showInputModal('Quick note', '', 'Add timestamped note to live notes');
     if (!n) return;
@@ -1018,47 +1448,8 @@ async function renderLiveRoom(session) {
     step();
   }
 
-  // Create floating "UR RECORDING" overlay (prominent, always visible, pick screen from it)
-  let overlay = null;
-  if (isRoom) {
-    overlay = document.createElement('div');
-    overlay.id = 'rec-overlay';
-    overlay.style.cssText = 'position:fixed;bottom:18px;right:18px;z-index:99999;background:#111113;border:1px solid #ef4444;border-radius:9999px;padding:8px 14px;box-shadow:0 10px 30px rgba(0,0,0,.6);display:flex;align-items:center;gap:10px;font-size:13px;user-select:none;';
-    overlay.innerHTML = `
-      <div style="color:#f87171;display:flex;align-items:center;gap:6px;font-weight:700;letter-spacing:.5px;">
-        <i class="fa-solid fa-circle fa-beat" style="color:#fda4af"></i>
-        <span>RECORDING</span>
-      </div>
-      <div id="overlay-capture" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fda4af;font-size:11px;">${captureLabel}</div>
-      <button id="ov-pick" style="font-size:10px;padding:2px 8px;border-radius:9999px;background:#3f2a2a;border:1px solid #7f1d1d;color:#fda4af;">Pick screen</button>
-      <button id="ov-stop" style="font-size:10px;padding:2px 8px;border-radius:9999px;background:#7f1d1d;color:white;">Stop</button>
-    `;
-    document.body.appendChild(overlay);
-
-    // simple drag
-    let dragging = false, ox=0, oy=0;
-    overlay.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return;
-      dragging = true;
-      ox = e.clientX - overlay.getBoundingClientRect().left;
-      oy = e.clientY - overlay.getBoundingClientRect().top;
-      document.body.style.userSelect = 'none';
-    });
-    document.addEventListener('mousemove', (e) => {
-      if (!dragging || !overlay) return;
-      overlay.style.left = (e.clientX - ox) + 'px';
-      overlay.style.top = (e.clientY - oy) + 'px';
-      overlay.style.bottom = 'auto';
-      overlay.style.right = 'auto';
-    }, {passive:true});
-    document.addEventListener('mouseup', () => { dragging=false; document.body.style.userSelect=''; }, {once:true});
-
-    // wire overlay buttons immediately (hoisted handlers are already on window at this point)
-    const p = document.getElementById('ov-pick');
-    const s = document.getElementById('ov-stop');
-    if (p) p.onclick = (e) => { e.stopImmediatePropagation(); pickScreenForLive(); };
-    if (s) s.onclick = (e) => { e.stopImmediatePropagation(); stopLiveRoom(session.id); };
-  }
+  // No floating draggable overlay. The recording state now lives inside the page dock only,
+  // which avoids the old "stuck to mouse" behavior and duplicate controls.
 
   // (updateCaptureUI hoisted early with the button handlers; duplicate removed here)
 
@@ -1198,7 +1589,7 @@ async function renderDuoSetup(session) {
   const content = document.getElementById('main-content');
   content.innerHTML = `
     <div class="max-w-lg">
-      <div class="mb-4">Duo / Link Mode — ${session.title}</div>
+      <div class="mb-4">Duo / Link Mode — ${esc(session.title)}</div>
       
       <div class="grid grid-cols-2 gap-4">
         <div class="bg-[#111113] border border-zinc-700 rounded-3xl p-5">
@@ -1418,10 +1809,10 @@ async function renderDecisionsView(content, actionsEl) {
     html += decisions.map(d => `
       <div class="card bg-[#111113] border border-zinc-800 p-4 rounded-3xl mb-3">
         <div class="flex justify-between">
-          <div class="font-medium">${d.title}</div>
+          <div class="font-medium">${esc(d.title)}</div>
           <div class="text-xs px-2 py-0.5 rounded bg-zinc-800">${d.status}</div>
         </div>
-        ${d.notes ? `<div class="text-xs text-zinc-400 mt-1">${d.notes}</div>` : ''}
+        ${d.notes ? `<div class="text-xs text-zinc-400 mt-1">${esc(d.notes)}</div>` : ''}
         <div class="flex gap-2 mt-3 text-xs">
           <button onclick="editDecision('${d.id}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Edit</button>
           <button onclick="deleteDecision('${d.id}')" class="px-3 py-1 border border-red-800 text-red-400 rounded-xl">Delete</button>
@@ -1488,7 +1879,7 @@ async function renderTasksView(content, actionsEl) {
 
 function taskHtml(t) {
   return `<div class="flex justify-between items-center py-2 border-b border-zinc-800 text-sm">
-    <span>${t.title} <span class="text-xs text-zinc-500">(${t.priority})</span></span>
+    <span>${esc(t.title)} <span class="text-xs text-zinc-500">(${esc(t.priority)})</span></span>
     <span class="flex gap-1 text-xs">
       <button onclick="toggleTask('${t.id}', '${t.status}')" class="px-2 py-px border border-zinc-700 rounded">${t.status === 'open' ? 'Done' : 'Reopen'}</button>
       <button onclick="deleteTask('${t.id}')" class="px-2 py-px border border-red-800 text-red-400 rounded">Del</button>
@@ -1542,12 +1933,12 @@ async function renderIdeasView(content, actionsEl) {
       return `<div class="card p-4 bg-[#111113] border border-zinc-800 rounded-3xl mb-3">
         <div class="flex items-center justify-between">
           <div>
-            <div class="font-medium">${i.title} <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${st}</span></div>
-            <div class="text-xs text-zinc-400 mt-0.5">${i.description || ''}</div>
+            <div class="font-medium">${esc(i.title)} <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${esc(st)}</span></div>
+            <div class="text-xs text-zinc-400 mt-0.5">${esc(i.description || '')}</div>
           </div>
         </div>
         <div class="mt-3 flex flex-wrap gap-2 text-xs">
-          <button onclick="renameIdea('${i.id}', '${(i.title||'').replace(/'/g,"\\'")}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Rename</button>
+          <button onclick="renameIdea('${i.id}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Rename</button>
           <button onclick="editIdea('${i.id}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Edit</button>
           <button onclick="convertIdea('${i.id}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Convert to Task</button>
           <button onclick="promoteIdeaToDecision('${i.id}')" class="px-3 py-1 border border-zinc-700 rounded-xl">Promote to Decision</button>
@@ -1567,7 +1958,10 @@ window.setIdeaFilter = async function(f) {
   await switchView('ideas');
 };
 
-window.renameIdea = async function(id, currentTitle) {
+window.renameIdea = async function(id) {
+  const ideas = await window.vibeforge.getIdeas(currentProject.id);
+  const idea = ideas.find(x => x.id === id);
+  const currentTitle = idea ? idea.title : '';
   const newTitle = await window.showInputModal('New title', currentTitle, 'Rename the idea');
   if (!newTitle || newTitle === currentTitle) return;
   await window.vibeforge.updateIdea({ id, title: newTitle });
@@ -1660,7 +2054,7 @@ async function renderTimelineView(content) {
   const events = await window.vibeforge.getTimeline(currentProject.id);
   let html = `<div class="font-semibold text-xl mb-4">Timeline</div>`;
   if (!events.length) html += `<div class="empty">No events yet. Create sessions, decisions, tasks or ideas.</div>`;
-  else html += events.map(e => `<div class="py-2 border-b border-zinc-800 text-sm">${new Date(e.timestamp).toLocaleString()} — <span class="text-zinc-400">${e.type}</span> ${e.title}</div>`).join('');
+  else html += events.map(e => `<div class="py-2 border-b border-zinc-800 text-sm">${new Date(e.timestamp).toLocaleString()} — <span class="text-zinc-400">${esc(e.type)}</span> ${esc(e.title)}</div>`).join('');
   content.innerHTML = html;
 }
 
@@ -1711,12 +2105,23 @@ window.doMemorySearch = async function() {
       <div class="py-1 flex justify-between items-start border-b border-zinc-800">
         <div>
           <span class="text-xs uppercase text-zinc-500">${r.type}</span>
-          <span class="font-medium ml-1">${r.text}</span>
+          <span class="font-medium ml-1">${esc(r.text)}</span>
           ${src}
         </div>
         <button onclick="openMemoryResult('${r.type}', '${r.id}')" class="text-xs px-2 border border-zinc-700 rounded">Open</button>
       </div>`;
   }).join('');
+};
+
+window.doMemorySearchFromBar = async function() {
+  const q = (document.getElementById('global-search')?.value || '').trim();
+  if (!q) return;
+  await switchView('memory');
+  const memoryInput = document.getElementById('memory-q');
+  if (memoryInput) {
+    memoryInput.value = q;
+    await window.doMemorySearch();
+  }
 };
 
 window.openMemoryResult = async function(type, id) {
@@ -2169,13 +2574,6 @@ setTimeout(async () => {
   } catch (e) {}
 }, 6000);
 
-if (window.vibeforge.onGithubDeviceCode) {
-  window.vibeforge.onGithubDeviceCode((data) => {
-    lastDeviceCode = data;
-    showDeviceCodeUI(data);
-  });
-}
-
 if (window.vibeforge.onGithubSigninLog) {
   window.vibeforge.onGithubSigninLog((line) => {
     const log = document.getElementById('github-signin-log');
@@ -2193,30 +2591,6 @@ if (window.vibeforge.onGithubSigninDone) {
     // After done, check who we are logged in as
     await checkAndEnableDevMode();
   });
-}
-
-function showDeviceCodeUI(data) {
-  // Find or create a prominent code display area in the current Settings view
-  let container = document.getElementById('github-device-code-area');
-  if (!container) {
-    container = document.createElement('div');
-    container.id = 'github-device-code-area';
-    container.className = 'mt-3 p-4 bg-[#1a1a1f] border border-emerald-700 rounded-2xl text-center';
-    // Try to insert it near the sign in button in the updates tab
-    const updatesPane = document.getElementById('settings-pane');
-    if (updatesPane) updatesPane.appendChild(container);
-  }
-
-  container.innerHTML = `
-    <div class="text-emerald-400 font-semibold mb-1">GitHub Device Code</div>
-    <div class="text-3xl font-mono tracking-[4px] my-2 select-all">${data.code}</div>
-    <div class="text-xs text-zinc-400 mb-2">Enter this code on the GitHub page</div>
-    <div class="flex gap-2 justify-center">
-      <button onclick="navigator.clipboard.writeText('${data.code}').then(()=>alert('Code copied'))" class="px-4 py-1.5 bg-white text-black rounded-2xl text-sm">Copy Code</button>
-      <button onclick="window.vibeforge.ghOpenRepo({owner:'jayton123456789-hub', repo:'VibeForge'}) || window.open('${data.url || 'https://github.com/login/device'}', '_blank')" class="px-4 py-1.5 bg-emerald-600 rounded-2xl text-sm">Open github.com/login/device</button>
-    </div>
-    <div class="text-[10px] text-zinc-500 mt-2">After you enter the code on the page, click "Check Login Status" below.</div>
-  `;
 }
 
 async function checkAndEnableDevMode() {
@@ -2256,94 +2630,7 @@ async function checkAndEnableDevMode() {
   return false;
 }
 
-// Pure device flow - no 'gh' CLI required. Shows the code in the app so user can enter it on github.com/login/device.
-// This solves the "gh not recognized" problem and lets us detect Jayton's account for DEV/publishing.
-window.githubDeviceFlow = async function(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Requesting device code...'; }
-
-  const clientId = '178c6fc778ccc68e'; // Public client id used by GitHub CLI for device flow
-
-  try {
-    // 1. Request device & user code
-    const codeRes = await fetch('https://github.com/login/device/code', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `client_id=${clientId}&scope=repo%20read:user`
-    });
-    const codeData = await codeRes.json();
-
-    if (codeData.error) {
-      throw new Error(codeData.error_description || codeData.error);
-    }
-
-    const { device_code, user_code, verification_uri, interval = 5 } = codeData;
-
-    // Show big code in the UI (the showDeviceCodeInUI function handles display)
-    showDeviceCodeInUI({ code: user_code, url: verification_uri });
-
-    if (btn) btn.textContent = 'Code shown below — enter it on GitHub';
-
-    // Auto open the page for convenience
-    try {
-      window.open(verification_uri, '_blank');
-    } catch (e) {}
-
-    // 2. Poll for token
-    const start = Date.now();
-    const timeout = 15 * 60 * 1000; // 15 min
-
-    while (Date.now() - start < timeout) {
-      await new Promise(r => setTimeout(r, interval * 1000));
-
-      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `client_id=${clientId}&device_code=${device_code}&grant_type=urn:ietf:params:oauth:grant-type:device_code`
-      });
-      const tokenData = await tokenRes.json();
-
-      if (tokenData.access_token) {
-        // Success! Save the token locally (never sent anywhere except to GitHub from this machine)
-        await window.vibeforge.saveSetting('github_pat', tokenData.access_token);
-
-        const logEl = document.getElementById('github-signin-log');
-        if (logEl) logEl.textContent += '\nSuccess! Token obtained. Checking account...\n';
-
-        // Detect if this is Jayton → enable DEV publishing mode
-        await checkAndEnableDevModeWithToken(tokenData.access_token);
-
-        if (btn) btn.textContent = 'SIGNED IN ✓';
-        showToast('GitHub sign-in complete. DEV mode enabled if this is your account.');
-        return;
-      }
-
-      if (tokenData.error === 'authorization_pending') {
-        const logEl = document.getElementById('github-signin-log');
-        if (logEl) logEl.textContent = 'Waiting for you to enter the code on GitHub...\n';
-        continue;
-      }
-      if (tokenData.error === 'slow_down') {
-        await new Promise(r => setTimeout(r, 5000));
-        continue;
-      }
-      if (tokenData.error) {
-        throw new Error(tokenData.error_description || tokenData.error);
-      }
-    }
-
-    throw new Error('Timed out waiting for authorization.');
-
-  } catch (e) {
-    const logEl = document.getElementById('github-signin-log');
-    if (logEl) logEl.textContent += `\nError: ${e.message}\n`;
-    showToast('Sign-in error: ' + e.message);
-    if (btn) btn.textContent = 'SIGN IN TO GITHUB';
-  } finally {
-    if (btn && btn.textContent.includes('started')) btn.disabled = false;
-  }
-};
-
-// Updated entry point for the big sign in button - uses the pure flow above
+// Sign in via gh CLI (the one supported flow — token persists in gh's keyring across launches)
 window.doGhSignin = async function(btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Opening GitHub login in browser...'; }
   const logEl = document.getElementById('github-signin-log') || document.getElementById('build-log');
@@ -2358,49 +2645,6 @@ window.doGhSignin = async function(btn) {
   // After sign in attempt, auto-check the account for DEV mode
   setTimeout(() => checkAndEnableDevMode(), 800);
 };
-
-// Helper to check user with a token we just obtained and enable DEV mode for Jayton's account
-async function checkAndEnableDevModeWithToken(token) {
-  try {
-    const res = await fetch('https://api.github.com/user', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/vnd.github+json'
-      }
-    });
-    if (!res.ok) return;
-
-    const user = await res.json();
-    const logEl = document.getElementById('github-signin-log');
-    const statusEl = document.getElementById('gh-status');
-
-    if (statusEl) statusEl.innerHTML = `Signed in as <strong>${user.login}</strong>`;
-
-    if (user.login === 'jayton123456789-hub') {
-      // This is the user → DEV mode
-      if (statusEl) statusEl.innerHTML += ` <span class="text-emerald-400 font-semibold">— DEV MODE: Publishing enabled for your repo</span>`;
-
-      // Prefill repo fields so publish goes to the right place
-      const ownerEl = document.getElementById('set-gh-owner');
-      const repoEl = document.getElementById('set-gh-repo');
-      if (ownerEl) ownerEl.value = 'jayton123456789-hub';
-      if (repoEl) repoEl.value = 'VibeForge';
-
-      // Persist so it survives restarts
-      await window.vibeforge.saveSetting('github_owner', 'jayton123456789-hub');
-      await window.vibeforge.saveSetting('github_repo', 'VibeForge');
-
-      if (logEl) logEl.textContent += `\nDetected your account (jayton123456789-hub). DEV publishing tools are now active.\nYou can build and publish releases directly to your repo from this app.\n`;
-
-      showToast('DEV mode active — you can now publish builds to your GitHub repo.');
-    } else {
-      if (logEl) logEl.textContent += `\nSigned in as ${user.login} (not the dev account for this repo).\n`;
-    }
-  } catch (e) {
-    const logEl = document.getElementById('github-signin-log');
-    if (logEl) logEl.textContent += `\nCould not verify account: ${e.message}\n`;
-  }
-}
 
 window.hardResetLocalData = async function() {
   if (!confirm('Hard reset will wipe the entire VibeForge userData folder (including caches). Continue?')) return;
@@ -2599,28 +2843,11 @@ window.publishToGitHub = async function(btn) {
     return;
   }
 
-  const settings = await window.vibeforge.getSettings();
-  const token = settings.github_pat;
-
   if (btn) { btn.disabled = true; btn.textContent = 'Publishing...'; }
-  if (logEl) logEl.textContent += `\nPublishing ${path.basename(artifactPath)} to ${owner}/${repo}...\n`;
+  const artifactName = artifactPath.split(/[\\/]/).pop();
+  if (logEl) logEl.textContent += `\nPublishing ${artifactName} to ${owner}/${repo}...\n`;
 
-  let r;
-  if (token) {
-    // Use token obtained from app sign-in (works even without gh CLI)
-    r = await window.vibeforge.githubPublishWithToken({
-      token,
-      owner,
-      repo,
-      tag,
-      title: `VibeForge ${tag}`,
-      body: 'Built and released directly from the VibeForge app (DEV mode).',
-      assetPath
-    });
-  } else {
-    // Fallback (requires gh CLI logged in)
-    r = await window.vibeforge.publishRelease({ version: tag, notes: 'Released from VibeForge', artifactPath, owner, repo });
-  }
+  const r = await window.vibeforge.publishRelease({ version: tag, notes: 'Released from VibeForge', artifactPath, owner, repo });
 
   if (r && r.ok) {
     if (logEl) logEl.textContent += `Success! ${r.url || ''}\n`;

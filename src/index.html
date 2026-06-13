@@ -8,10 +8,18 @@
   <script src="vendor/tailwind.js"></script>
   <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(124, 58, 237, 0.22), transparent 34%),
+        radial-gradient(circle at 92% 18%, rgba(20, 184, 166, 0.18), transparent 32%),
+        #070812;
+    }
+    .drag-region { -webkit-app-region: drag; }
+    button, input, textarea, select, .no-drag, .nav-item, #project-header { -webkit-app-region: no-drag; }
     .nav-item { transition: all 0.1s; }
-    .nav-item:hover { background-color: #1f1f23; }
-    .nav-item.active { background-color: #1f1f23; border-left: 3px solid #6366f1; padding-left: 13px; }
+    .nav-item:hover { background: rgba(99,102,241,.12); }
+    .nav-item.active { background: linear-gradient(90deg, rgba(99,102,241,.28), rgba(20,184,166,.06)); border: 1px solid rgba(99,102,241,.5); box-shadow: 0 0 26px rgba(99,102,241,.12); }
     .card { transition: all 0.1s; }
     .card:hover { border-color: #3b3b42; }
     .modal { animation: fadeIn 0.1s ease; }
@@ -19,95 +27,113 @@
     .empty { color: #52525b; }
     button { transition: all 0.1s; }
     button:active { transform: scale(0.985); }
-    .section-title { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #52525b; }
+    .section-title { font-size: 11px; letter-spacing: 1.8px; text-transform: uppercase; color: #6b7280; }
+    .glass-panel { background: rgba(11, 13, 24, .76); border: 1px solid rgba(148,163,184,.12); box-shadow: inset 0 1px rgba(255,255,255,.03), 0 20px 60px rgba(0,0,0,.22); }
+    .glow-primary { box-shadow: 0 0 0 1px rgba(99,102,241,.35), 0 14px 38px rgba(99,102,241,.22); }
+    .glow-record { box-shadow: 0 0 0 1px rgba(248,113,113,.45), 0 0 36px rgba(248,113,113,.28), inset 0 0 22px rgba(248,113,113,.2); }
   </style>
 </head>
-<body class="bg-[#0a0a0b] text-zinc-200">
+<body class="text-zinc-100 overflow-hidden">
   <div class="flex flex-col h-screen">
-    <!-- Top bar -->
-    <div class="h-11 bg-[#0a0a0b] border-b border-zinc-800 flex items-center px-4 select-none">
-      <div class="flex items-center gap-x-3 flex-1">
+    <!-- Command bar -->
+    <div class="drag-region h-20 px-6 flex items-center gap-6 select-none">
+      <div class="flex items-center gap-x-4 w-64">
         <div class="flex items-center gap-x-2">
-          <img src="../assets/LOGO.png" width="28" height="28" class="rounded" alt="VibeForge" onerror="this.style.display='none'">
-          <span class="font-semibold text-lg tracking-tight">VibeForge</span>
+          <img src="../assets/LOGO.png" width="34" height="34" class="rounded-xl" alt="VibeForge" onerror="this.style.display='none'">
+          <span class="font-semibold text-2xl tracking-tight">VibeForge</span>
         </div>
-        <div class="text-[10px] px-2 py-0.5 rounded bg-zinc-900 text-zinc-500">LOCAL</div>
+        <div class="text-[10px] px-3 py-1 rounded-full border border-cyan-500/40 text-cyan-300 bg-cyan-500/10">LOCAL</div>
       </div>
-      <div class="text-xs text-zinc-500">For creators who build through conversation</div>
+      <div class="no-drag flex-1 max-w-2xl mx-auto relative">
+        <i class="fa-solid fa-search absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"></i>
+        <input id="global-search" type="text" onkeydown="if(event.key==='Enter') doMemorySearchFromBar()" placeholder="Search sessions, notes, decisions...    Ctrl + K"
+               class="w-full h-12 bg-[#0d101d]/80 border border-zinc-700/70 rounded-xl pl-11 pr-4 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20">
+      </div>
+      <div class="no-drag flex items-center gap-3">
+        <button onclick="startNewSession()" class="px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white font-semibold glow-primary flex items-center gap-2">
+          <i class="fa-solid fa-plus"></i> New Session
+        </button>
+        <button onclick="showCaptureIdeaModal()" class="px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-teal-500 text-white font-semibold shadow-lg shadow-cyan-900/30 flex items-center gap-2">
+          <i class="fa-solid fa-lightbulb"></i> Capture Idea
+        </button>
+      </div>
     </div>
 
-    <div class="flex flex-1 overflow-hidden">
+    <div class="flex flex-1 overflow-hidden px-3 pb-3 gap-3">
       <!-- Sidebar - only real items -->
-      <div class="w-56 bg-[#0a0a0b] border-r border-zinc-800 flex flex-col">
+      <div class="w-72 glass-panel rounded-2xl flex flex-col overflow-hidden">
         <!-- Project header -->
-        <div class="p-3 border-b border-zinc-800">
+        <div class="p-3">
           <div id="project-header" onclick="showProjectMenu()" 
-               class="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-zinc-900 cursor-pointer group">
-            <div class="flex items-center gap-x-2 min-w-0">
-              <div id="project-avatar" class="w-7 h-7 rounded-lg flex-shrink-0 flex items-center justify-center text-xs font-bold bg-[#6366f1]">?</div>
+               class="flex items-center justify-between p-4 rounded-2xl cursor-pointer group bg-gradient-to-br from-indigo-950/70 to-violet-950/30 border border-indigo-500/20">
+            <div class="flex items-center gap-x-3 min-w-0">
+              <div id="project-avatar" class="w-12 h-12 rounded-2xl flex-shrink-0 flex items-center justify-center text-sm font-bold bg-gradient-to-br from-indigo-500 to-cyan-400">?</div>
               <div class="min-w-0">
-                <div id="project-name" class="font-medium text-sm truncate">No project</div>
-                <div id="project-meta" class="text-[10px] text-zinc-500">Create one to start</div>
+                <div id="project-name" class="font-semibold text-sm truncate">No project</div>
+                <div id="project-meta" class="text-[10px] text-emerald-300">Ready</div>
               </div>
             </div>
             <i class="fa-solid fa-chevron-down text-zinc-500 text-xs"></i>
           </div>
         </div>
 
-        <div class="px-2 pt-2 flex-1 overflow-auto">
+        <div class="px-3 pt-3 flex-1 overflow-auto">
           <div class="section-title px-3 mb-1">WORKSPACE</div>
 
-          <div onclick="switchView('sessions')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-sessions">
+          <div onclick="switchView('sessions')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-sessions">
             <i class="fa-solid fa-list w-4"></i><span>Sessions</span>
           </div>
-          <div onclick="switchView('decisions')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-decisions">
+          <div onclick="switchView('decisions')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-decisions">
             <i class="fa-solid fa-gavel w-4"></i><span>Decision Vault</span>
           </div>
-          <div onclick="switchView('tasks')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-tasks">
+          <div onclick="switchView('tasks')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-tasks">
             <i class="fa-solid fa-tasks w-4"></i><span>Tasks</span>
           </div>
-          <div onclick="switchView('ideas')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-ideas">
+          <div onclick="switchView('ideas')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-ideas">
             <i class="fa-solid fa-lightbulb w-4"></i><span>Idea Vault</span>
           </div>
-          <div onclick="switchView('timeline')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-timeline">
+          <div onclick="switchView('timeline')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-timeline">
             <i class="fa-solid fa-stream w-4"></i><span>Timeline</span>
           </div>
-          <div onclick="switchView('memory')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-memory">
+          <div onclick="switchView('memory')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-memory">
             <i class="fa-solid fa-search w-4"></i><span>Project Memory</span>
           </div>
 
           <div class="h-px bg-zinc-800 my-2 mx-2"></div>
 
-          <div onclick="switchView('share')" class="nav-item flex items-center gap-x-2.5 px-3 py-2 text-sm rounded-xl cursor-pointer mb-0.5" id="nav-share">
+          <div onclick="switchView('share')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-share">
             <i class="fa-solid fa-share-alt w-4"></i><span>Share</span>
           </div>
 
-          <div class="px-3 mt-4">
-            <div class="section-title mb-1.5">QUICK</div>
-            <button onclick="startNewSession()" 
-                    class="w-full flex items-center justify-center gap-x-2 px-4 py-2 bg-white text-black text-sm font-semibold rounded-2xl hover:bg-zinc-100 mb-2">
-              <i class="fa-solid fa-plus"></i>
-              <span>New Session</span>
+          <div class="px-2 mt-6">
+            <div class="section-title mb-2">QUICK ACTIONS</div>
+            <button onclick="quickStartRecording()" 
+                    class="w-full flex items-center justify-center gap-x-2 px-4 py-3 border border-cyan-500/40 text-white text-base font-semibold rounded-2xl hover:bg-cyan-500/10 mb-3">
+              <i class="fa-solid fa-microphone"></i>
+              <span>Quick Record</span>
             </button>
             <button onclick="showCaptureIdeaModal()" 
-                    class="w-full flex items-center justify-center gap-x-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-2xl hover:bg-emerald-500">
+                    class="w-full flex items-center justify-center gap-x-2 px-4 py-3 bg-gradient-to-r from-cyan-600 to-teal-500 text-white text-base font-semibold rounded-2xl shadow-lg shadow-cyan-950/40">
               <i class="fa-solid fa-lightbulb"></i>
               <span>Capture Idea</span>
             </button>
           </div>
         </div>
 
-        <div class="p-3 border-t border-zinc-800">
-          <div onclick="switchView('settings')" class="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer rounded-lg hover:bg-zinc-900" id="nav-settings">
-            <i class="fa-solid fa-cog"></i>
-            <span>Settings</span>
+        <div class="p-3">
+          <div onclick="switchView('settings')" class="flex items-center justify-between gap-2 px-4 py-3 text-sm text-zinc-300 hover:text-zinc-100 cursor-pointer rounded-xl hover:bg-zinc-900 border border-zinc-800" id="nav-settings">
+            <span><i class="fa-solid fa-cog mr-2"></i>Settings</span>
+            <i class="fa-solid fa-chevron-right text-xs text-zinc-500"></i>
           </div>
+          <button onclick="showFirstRunTour()" class="w-full mt-2 px-4 py-2 text-xs text-zinc-400 hover:text-zinc-100 rounded-xl hover:bg-zinc-900 text-left">
+            <i class="fa-solid fa-circle-question mr-2"></i>Show Tour
+          </button>
         </div>
       </div>
 
       <!-- Main content -->
-      <div class="flex-1 flex flex-col overflow-hidden">
-        <div id="main-header" class="h-12 border-b border-zinc-800 px-5 flex items-center justify-between text-sm font-medium">
+      <div class="flex-1 flex flex-col overflow-hidden glass-panel rounded-2xl">
+        <div id="main-header" class="h-12 border-b border-zinc-800/80 px-5 flex items-center justify-between text-sm font-medium">
           <div id="view-title">Sessions</div>
           <div id="view-actions"></div>
         </div>
@@ -128,9 +154,9 @@
 
       <div class="space-y-4">
         <div>
-          <label class="text-xs text-zinc-400 block mb-1">SESSION NAME</label>
-          <input id="session-name" type="text" placeholder="Feature brainstorm with Nick" 
-                 class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500">
+          <label class="text-xs text-zinc-400 block mb-1">SESSION NAME <span class="text-zinc-600">(optional)</span></label>
+          <input id="session-name" type="text" placeholder="Leave blank and VibeForge will name it" 
+                 class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base text-white focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20">
         </div>
 
         <div>
@@ -197,13 +223,13 @@
   </div>
 
   <!-- Generic Input Modal (replaces browser prompt() which is disabled in this sandboxed Electron renderer) -->
-  <div id="input-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50" onclick="if (event.target.id === 'input-modal') hideInputModal()">
-    <div onclick="event.stopImmediatePropagation()" class="bg-[#111113] border border-zinc-700 rounded-3xl w-full max-w-md p-6">
+  <div id="input-modal" class="hidden fixed inset-0 bg-black/75 flex items-center justify-center z-[500]" onclick="if (event.target.id === 'input-modal') hideInputModal()">
+    <div onclick="event.stopImmediatePropagation()" class="bg-[#111113] border border-zinc-600 rounded-3xl w-full max-w-md p-6 shadow-2xl shadow-black/60">
       <div class="flex justify-between mb-4">
         <div id="input-modal-title" class="font-semibold text-lg">Input</div>
         <button onclick="hideInputModal()" class="text-zinc-400 hover:text-white text-xl leading-none">&times;</button>
       </div>
-      <input id="input-modal-input" type="text" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500" placeholder="">
+      <input id="input-modal-input" type="text" class="w-full bg-zinc-950 border border-zinc-600 rounded-2xl px-4 py-3 text-base text-white caret-cyan-300 focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20" placeholder="">
       <div id="input-modal-hint" class="text-xs text-zinc-500 mt-1.5"></div>
       <div class="flex gap-3 mt-6">
         <button onclick="hideInputModal()" class="flex-1 py-2.5 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium">Cancel</button>
