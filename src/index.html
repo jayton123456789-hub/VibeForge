@@ -114,6 +114,17 @@
           <div onclick="switchView('share')" class="nav-item flex items-center gap-x-3 px-4 py-3 text-base rounded-xl cursor-pointer mb-1" id="nav-share">
             <i class="fa-solid fa-link w-4"></i><span>Link</span>
           </div>
+          <div id="link-subnav" class="hidden ml-5 mb-2 space-y-1">
+            <button id="link-sub-control" onclick="switchLinkMode('control')" class="link-sub-btn w-full text-left px-4 py-2 rounded-xl text-sm text-zinc-400 hover:text-white hover:bg-zinc-900">
+              <i class="fa-solid fa-gamepad mr-2 text-cyan-300"></i>Control
+            </button>
+            <button id="link-sub-remote" onclick="switchLinkMode('remote')" class="link-sub-btn w-full text-left px-4 py-2 rounded-xl text-sm text-zinc-400 hover:text-white hover:bg-zinc-900">
+              <i class="fa-solid fa-database mr-2 text-blue-300"></i>Remote Vault
+            </button>
+            <button id="link-sub-vault" onclick="switchLinkMode('vault')" class="link-sub-btn w-full text-left px-4 py-2 rounded-xl text-sm text-zinc-400 hover:text-white hover:bg-zinc-900">
+              <i class="fa-solid fa-box-open mr-2 text-emerald-300"></i>Link Vault
+            </button>
+          </div>
 
           <div class="px-2 mt-6">
             <div class="section-title mb-2">QUICK ACTIONS</div>

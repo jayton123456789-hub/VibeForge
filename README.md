@@ -76,9 +76,9 @@ All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibli
 
 No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer connection.
 
-## Recent Fixes (v0.4.3)
+## Recent Fixes (v0.4.4)
 
-- Link workspace: Share is now Link. It has Host/Join, a one-PC tester window, connected-state controls, mirrored tabs, linked-session invites, active-recording island while browsing other tabs, Remote Vault snapshots, ping, latest-notes send, and Link Vault file transfer.
+- Link workspace: Share is now Link. After connecting, Link unlocks real sidebar child tabs: Control, Remote Vault, and Link Vault. It also supports mirrored tabs, linked-session invites, the active-recording island while browsing other tabs, remote snapshots, ping, latest-notes send, and file transfer.
 - Launch is hardened: launch.bat no longer force-rebuilds better-sqlite3 every run, preventing the EPERM native-module crash when Electron still has the .node file locked.
 - Update checks normalize tags like v4 to 0.4.0 so accidental GitHub release names do not confuse the app.
 - Continue/resume sessions: Resume Live buttons reopen the same session with previous notes/transcript and save new timestamped recording segments.
@@ -91,7 +91,7 @@ No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer
 
 - Everyone gets a big CHECK FOR UPDATE in Settings.
 - Owner uses the same tab for real publishing.
-- Current recommended release: v0.4.3 or newer.
+- Current recommended release: v0.4.4 or newer.
 
 ## Philosophy
 

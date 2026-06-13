@@ -26,6 +26,7 @@ let projects = [];
 let peerStatus = { status: 'offline', address: '' };
 let receivedItems = [];
 let remoteVaultSnapshot = null;
+let currentLinkMode = 'control';
 // Global timer ref so repeated quickStartRecording never stacks intervals
 let _globalTimerInterval = null;
 let _activeLiveSession = null;
@@ -335,7 +336,31 @@ async function switchView(view) {
   else if (view === 'memory') await renderMemoryView(content, actions);
   else if (view === 'share') await renderShareView(content, actions);
   else if (view === 'settings') await renderSettingsView(content, actions);
+  updateLinkSubnav();
 }
+
+function updateLinkSubnav() {
+  const subnav = document.getElementById('link-subnav');
+  if (!subnav) return;
+  const linked = peerStatus && peerStatus.status === 'connected';
+  subnav.classList.toggle('hidden', !linked);
+  document.querySelectorAll('.link-sub-btn').forEach(btn => {
+    btn.classList.remove('bg-zinc-900', 'text-white', 'border', 'border-cyan-500/40');
+    btn.classList.add('text-zinc-400');
+  });
+  const active = document.getElementById('link-sub-' + currentLinkMode);
+  if (active && linked) {
+    active.classList.add('bg-zinc-900', 'text-white', 'border', 'border-cyan-500/40');
+    active.classList.remove('text-zinc-400');
+  }
+}
+
+window.switchLinkMode = async function(mode) {
+  if (!['control', 'remote', 'vault'].includes(mode)) mode = 'control';
+  currentLinkMode = mode;
+  updateLinkSubnav();
+  await switchView('share');
+};
 
 // 4. SESSIONS VIEW - fully wired
 async function renderSessionsView(content, actionsEl) {
@@ -1896,50 +1921,47 @@ async function renderShareView(content, actionsEl) {
       <i class="fa-solid ${icon} mr-2 text-cyan-300"></i>${label}
     </button>`).join('');
 
-  const connectedWorkspace = isConnected ? `
+
+  const linkVaultHtml = `
     <section class="rounded-[30px] border border-emerald-500/25 bg-emerald-500/10 p-5">
       <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div class="text-xs uppercase tracking-[.18em] text-emerald-300">Connected workspace</div>
-          <div class="mt-1 text-2xl font-semibold text-white">Both apps are linked</div>
-          <div class="mt-1 text-sm text-zinc-400">This is where Link starts feeling like the same app for both people: mirror tabs, send session context, and launch the Duo session once both sides are ready.</div>
-        </div>
+        <div><div class="text-xs uppercase tracking-[.18em] text-emerald-300">Link Vault</div><div class="mt-1 text-2xl font-semibold text-white">Shared file drop</div><div class="mt-1 text-sm text-zinc-400">Drop files here or choose a file. Received files save to each PC. Folders should be zipped first.</div></div>
         <button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button>
       </div>
+      <div id="link-vault-drop" class="mt-5 rounded-[28px] border border-dashed border-cyan-500/40 bg-cyan-500/5 p-10 text-center text-sm text-zinc-300">
+        <i class="fa-solid fa-cloud-arrow-up mb-3 text-4xl text-cyan-300"></i>
+        <div class="text-xl font-semibold text-white">Drop files here</div>
+        <div class="mt-2 text-sm text-zinc-500">Zips, mp3s, exports, images, docs, builds, almost anything.</div>
+        <button onclick="sendExportedBundle()" class="mt-5 rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-semibold text-white hover:bg-cyan-500">Choose File</button>
+      </div>
+      <div class="mt-5 rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div class="font-semibold text-white">Received</div><button onclick="revealReceivedFolder()" class="rounded-xl border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Open Folder</button></div><div class="mt-3 space-y-2">${receivedHtml}</div></div>
+    </section>`;
 
-      ${window._pendingDuoSession ? `
-        <div class="mt-5 rounded-3xl border border-emerald-400/30 bg-black/30 p-5">
-          <div class="font-semibold text-emerald-100">Duo session ready</div>
-          <div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are linked.</div>
-          <button onclick="startPendingLinkedSession()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button>
-        </div>` : ''}
-
+  const controlHtml = `
+    <section class="rounded-[30px] border border-emerald-500/25 bg-emerald-500/10 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div><div class="text-xs uppercase tracking-[.18em] text-emerald-300">Link Control</div><div class="mt-1 text-2xl font-semibold text-white">Both apps are linked</div><div class="mt-1 text-sm text-zinc-400">Control is for shared navigation and Duo session invites. Remote data lives in Remote Vault. Files live in Link Vault.</div></div>
+        <button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button>
+      </div>
+      ${window._pendingDuoSession ? `<div class="mt-5 rounded-3xl border border-emerald-400/30 bg-black/30 p-5"><div class="font-semibold text-emerald-100">Duo session ready</div><div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are linked.</div><button onclick="startPendingLinkedSession()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button></div>` : ''}
       <div class="mt-5 grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
-        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
-          <div class="flex items-center justify-between gap-3">
-            <div><div class="font-semibold text-white">Mirror a tab</div><div class="text-xs text-zinc-500">Click a tab and the other person jumps there too.</div></div>
-            <span class="rounded-full border border-cyan-500/30 px-3 py-1 text-[11px] text-cyan-300">Shared control</span>
-          </div>
-          <div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">${mirrorButtons}</div>
-        </div>
+        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div><div class="font-semibold text-white">Mirror a tab</div><div class="text-xs text-zinc-500">Click a tab and the other person jumps there too.</div></div><span class="rounded-full border border-cyan-500/30 px-3 py-1 text-[11px] text-cyan-300">Shared control</span></div><div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">${mirrorButtons}</div></div>
+        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5"><div class="font-semibold text-white">Quick link checks</div><div class="mt-1 text-xs text-zinc-500">Small proof that both apps can talk.</div><div class="mt-4 grid gap-2"><button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-note-sticky mr-2 text-purple-300"></i>Send latest session notes</button><button onclick="sendLinkPing()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-satellite-dish mr-2 text-emerald-300"></i>Send test ping</button></div></div>
+      </div>
+    </section>`;
 
-        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
-          <div class="font-semibold text-white">Link Vault</div>
-          <div class="mt-1 text-xs text-zinc-500">Drop files here or pick one. Received files save to each PC.</div>
-          <div id="link-vault-drop" class="mt-4 rounded-3xl border border-dashed border-cyan-500/40 bg-cyan-500/5 p-5 text-center text-sm text-zinc-300">
-            <i class="fa-solid fa-cloud-arrow-up mb-2 text-2xl text-cyan-300"></i>
-            <div class="font-semibold text-white">Drop files here</div>
-            <div class="mt-1 text-xs text-zinc-500">Zips, mp3s, exports, images, docs - folders should be zipped first.</div>
-            <button onclick="sendExportedBundle()" class="mt-4 rounded-2xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500">Choose File</button>
-          </div>
-          <div class="mt-3 grid gap-2">
-            <button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-note-sticky mr-2 text-purple-300"></i>Send latest session notes</button>
-            <button onclick="sendLinkPing()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-satellite-dish mr-2 text-emerald-300"></i>Send test ping</button>
-          </div>
-        </div>
+  const remoteVaultPageHtml = `
+    <section class="rounded-[30px] border border-blue-500/25 bg-blue-500/10 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div><div class="text-xs uppercase tracking-[.18em] text-blue-300">Remote Vault</div><div class="mt-1 text-2xl font-semibold text-white">Their workspace snapshot</div><div class="mt-1 text-sm text-zinc-400">This shows their sessions, tasks, decisions, and ideas from the linked PC. It is a snapshot, not full live DB sync yet.</div></div>
+        <div class="flex gap-2"><button onclick="requestRemoteVault()" class="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">Request / Refresh</button><button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button></div>
       </div>
       ${remoteVaultHtml}
-    </section>` : '';
+    </section>`;
+
+  const connectedWorkspace = isConnected
+    ? (currentLinkMode === 'vault' ? linkVaultHtml : currentLinkMode === 'remote' ? remoteVaultPageHtml : controlHtml)
+    : '';
 
   content.innerHTML = `
     <div class="space-y-5">
@@ -1963,7 +1985,7 @@ async function renderShareView(content, actionsEl) {
 
       ${connectedWorkspace}
 
-      <div class="grid gap-4 xl:grid-cols-[1fr_350px]">
+      <div class="${isConnected ? 'hidden' : 'grid'} gap-4 xl:grid-cols-[1fr_350px]">
         <section class="grid gap-4 lg:grid-cols-2">
           <div class="rounded-[28px] border border-purple-500/25 bg-purple-500/10 p-5">
             <div class="flex items-center gap-3"><div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-purple-500/20 text-purple-200"><i class="fa-solid fa-tower-broadcast"></i></div><div><div class="font-semibold text-white">Host</div><div class="text-xs text-zinc-400">Creates the room code.</div></div></div>
@@ -3987,6 +4009,7 @@ async function refreshServiceStatus() {
 
   function _setPeerStatus(data) {
     peerStatus = data;
+    updateLinkSubnav();
     if (currentView === 'share') {
       const c = document.getElementById('main-content');
       const a = document.getElementById('view-actions');
