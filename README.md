@@ -15,10 +15,10 @@ Built for real workflows between you and your collaborator (e.g. Jayton + Nick).
 ## ✨ Features
 
 - **Quick Capture & Idea Vault**: Hit "Capture Idea" from sidebar or sessions (even mid-conversation). Big text box + optional title. Auto-titles from first words. Smart rename with Ollama if available. Filters (Inbox / Saved / Archived / Converted), edit, convert to task/decision, archive, delete. All persist with timeline.
-- **Live Recording Sessions**: Room (local mic + screen/window picker with system audio + live preview, level meter, big "RECORDING" overlay + draggable pill), Duo/Link (WebSocket peer over LAN), or Manual notes. **Live Convo/Transcript** with real-time typewriter speech-to-text. Mark decisions/tasks/ideas live via button menu. **Resume / continue any previous session** anytime (multi-visit support) — new recordings save as timestamped segments, notes + transcript append. Audio/video playback in detail. Full date/time tracking (start, end, duration) in lists and detail.
+- **Live Recording Sessions**: Room (local mic + screen/window picker with system audio + live preview, real waveform/meter, clear in-page recording dock), Duo/Link (room-code PeerJS/WebRTC), or Manual notes. **Live Convo/Transcript** with real-time typewriter speech-to-text. Mark decisions/tasks/ideas live via button menu. **Resume / continue any previous session** anytime (multi-visit support) — new recordings save as timestamped segments, notes + transcript append. Waveform playback in detail. Full date/time tracking (start, end, duration) in lists and detail.
 - **Decision Vault, Tasks & Timeline**: Track choices, action items, and full history. Convert ideas ↔ tasks/decisions.
 - **Project Memory**: Local search across everything + Ollama-powered chat that only uses your real data (no hallucinations). Save useful answers.
-- **Link with collaborators (real P2P)**: Host/Join over local network (no internet). Send notes, files, bundles. Received items saved locally with reveal. Clear instructions + firewall troubleshooting built in.
+- **Link with collaborators (real P2P)**: Host/Join with room codes for separate PCs. Send linked session invites, peer recording state, AI cleanup summaries, notes, files, and bundles. Received items save locally with reveal.
 - **In-App Publishing (for repo owner)**: In Settings > Updates, sign in with gh CLI (persists), auto-detects DEV/owner account, one-click build portable + publish real GitHub release with the .exe attached. "CHECK FOR UPDATE" for everyone else.
 - **Ollama AI Integration**: Local-only. Smart naming, summaries, task/decision extraction, memory chat, model pull/install helpers, warnings for disk/RAM. Works offline.
 - **Exports & Folders**: Real files in `%APPDATA%\VibeForge\exports\...` (not just browser downloads). Reveal buttons everywhere. Markdown, JSON, Grok prompts.
@@ -75,6 +75,15 @@ All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibli
 - Received files land in the local `received\` folder with reveal.
 
 No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer connection.
+
+## Recent Fixes (v0.4.6)
+
+- Recording review now bundles `wavesurfer.js` locally (BSD-3-Clause) for real waveform playback on saved sessions. Native audio controls remain as a fallback.
+- Live recording UI replaces fake dashed waveform strips with real canvas waveform motion from the mic analyser.
+- Duo/Link recording now has a two-person participant strip ("You" + linked PC) and explicit "Duo Link Session" labeling so it feels connected, not like a solo room.
+- Linked apps now send/receive `session-state` while recording. If the peer starts recording and your side is idle, VibeForge shows a Join Session prompt and Link Control gets an active peer recording card.
+- Tour spotlight positioning is fixed for the scrollable sidebar: it scrolls the target into view first, then measures the final position, so Quick Record/Capture Idea/Link highlights do not drift onto the wrong button.
+- Version bumped to `0.4.6`.
 
 ## Recent Fixes (v0.4.5)
 

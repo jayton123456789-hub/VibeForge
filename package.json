@@ -1,6 +1,6 @@
 {
   "name": "vibeforge",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Local AI Creative Session Studio - minimal working version",
   "main": "main.js",
   "scripts": {
@@ -19,6 +19,7 @@
   "dependencies": {
     "better-sqlite3": "^9.6.0",
     "uuid": "^9.0.1",
+    "wavesurfer.js": "^7.12.8",
     "ws": "^8.21.0"
   },
   "devDependencies": {

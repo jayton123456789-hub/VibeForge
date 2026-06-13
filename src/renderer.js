@@ -32,6 +32,8 @@ let _globalTimerInterval = null;
 let _activeLiveSession = null;
 let _duoPeerSessionNotes = {};
 let _duoPeerAiResults = {};
+let _duoPeerLiveState = null;
+const _sessionWaveforms = {};
 
 function getProfileNameFallback() {
   const n = document.getElementById('project-name')?.textContent || 'Linked collaborator';
@@ -45,6 +47,57 @@ async function isLinkConnected() {
   } catch (e) {
     return !!(peerStatus && peerStatus.status === 'connected');
   }
+}
+
+function getLinkedPeerName() {
+  return _duoPeerLiveState?.peerName || 'Linked PC';
+}
+
+function renderDuoParticipantStrip(session, connected) {
+  if (session.mode !== 'duo') return '';
+  const peerName = getLinkedPeerName();
+  const peerState = _duoPeerLiveState?.state || (connected ? 'linked' : 'waiting');
+  const peerStatus = peerState === 'recording'
+    ? '<span class="text-emerald-300"><i class="fa-solid fa-circle fa-beat mr-1"></i>Recording</span>'
+    : connected
+    ? '<span class="text-cyan-300">Linked</span>'
+    : '<span class="text-amber-300">Waiting</span>';
+  return `
+    <div class="mb-5 grid gap-3 lg:grid-cols-2">
+      <div class="rounded-[24px] border border-violet-500/25 bg-violet-500/10 p-4">
+        <div class="flex items-center gap-3">
+          <div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center font-bold">${esc(getProfileNameFallback()).slice(0,2).toUpperCase()}</div>
+          <div>
+            <div class="text-sm font-semibold">You</div>
+            <div class="text-xs text-emerald-300"><i class="fa-solid fa-circle fa-beat mr-1"></i>Recording this side</div>
+          </div>
+        </div>
+      </div>
+      <div class="rounded-[24px] border ${connected ? 'border-emerald-500/25 bg-emerald-500/10' : 'border-amber-500/25 bg-amber-500/10'} p-4">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <div class="h-12 w-12 rounded-2xl bg-gradient-to-br from-emerald-500 to-blue-500 flex items-center justify-center font-bold">${esc(peerName).slice(0,2).toUpperCase()}</div>
+            <div>
+              <div class="text-sm font-semibold">${esc(peerName)}</div>
+              <div id="duo-peer-state-label" class="text-xs">${peerStatus}</div>
+            </div>
+          </div>
+          <button onclick="switchView('share')" class="rounded-xl border border-zinc-700 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800">Link Control</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function filePathToUrl(filePath) {
+  if (!filePath) return '';
+  const normalized = String(filePath).replace(/\\/g, '/');
+  const clean = normalized.replace(/^\/+/, '');
+  const drive = clean.match(/^([A-Za-z]:)(\/.*)?$/);
+  if (drive) {
+    const rest = (drive[2] || '').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+    return `file:///${drive[1]}/${rest}`;
+  }
+  return `file:///${clean.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 // Init
@@ -172,31 +225,37 @@ function maybeShowFirstRunTour(force = false) {
     const step = steps[index];
     let el = document.querySelector(step.target);
     if (!el) el = document.getElementById('main-content') || document.body;
-    const rect = el.getBoundingClientRect();
-    const pad = 8;
-    const ring = document.getElementById('tour-ring');
-    ring.style.left = `${Math.max(8, rect.left - pad)}px`;
-    ring.style.top = `${Math.max(8, rect.top - pad)}px`;
-    ring.style.width = `${Math.max(44, rect.width + pad * 2)}px`;
-    ring.style.height = `${Math.max(44, rect.height + pad * 2)}px`;
-
-    const card = document.getElementById('tour-card');
-    const rightRoom = window.innerWidth - rect.right;
-    let left = rightRoom > 390 ? rect.right + 18 : rect.left - 378;
-    if (left < 16) left = 16;
-    if (left + 360 > window.innerWidth - 16) left = window.innerWidth - 376;
-    let top = rect.top;
-    if (top + 230 > window.innerHeight - 16) top = window.innerHeight - 246;
-    if (top < 16) top = 16;
-    card.style.left = `${left}px`;
-    card.style.top = `${top}px`;
     document.getElementById('tour-count').textContent = `${index + 1}/${steps.length}`;
     document.getElementById('tour-title').textContent = step.title;
     document.getElementById('tour-body').textContent = step.body;
     document.getElementById('tour-back').disabled = index === 0;
     document.getElementById('tour-back').style.opacity = index === 0 ? '.45' : '1';
     document.getElementById('tour-next').textContent = index === steps.length - 1 ? 'Finish' : 'Next';
-    try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) {}
+    try { el.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'nearest' }); } catch (e) {}
+
+    const place = () => {
+      if (!document.body.contains(overlay)) return;
+      const finalEl = document.querySelector(step.target) || el;
+      const rect = finalEl.getBoundingClientRect();
+      const pad = 8;
+      const ring = document.getElementById('tour-ring');
+      ring.style.left = `${Math.max(8, rect.left - pad)}px`;
+      ring.style.top = `${Math.max(8, rect.top - pad)}px`;
+      ring.style.width = `${Math.max(44, rect.width + pad * 2)}px`;
+      ring.style.height = `${Math.max(44, rect.height + pad * 2)}px`;
+
+      const card = document.getElementById('tour-card');
+      const rightRoom = window.innerWidth - rect.right;
+      let left = rightRoom > 390 ? rect.right + 18 : rect.left - 378;
+      if (left < 16) left = 16;
+      if (left + 360 > window.innerWidth - 16) left = window.innerWidth - 376;
+      let top = rect.top;
+      if (top + 230 > window.innerHeight - 16) top = window.innerHeight - 246;
+      if (top < 16) top = 16;
+      card.style.left = `${left}px`;
+      card.style.top = `${top}px`;
+    };
+    requestAnimationFrame(() => requestAnimationFrame(place));
   };
   overlay.querySelector('#tour-skip').onclick = () => close(false);
   overlay.querySelector('#tour-back').onclick = () => { if (index > 0) { index--; render(); } };
@@ -702,9 +761,18 @@ async function openSession(id) {
         </div>
 
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
-          <div class="font-semibold mb-3">Recording</div>
-          ${s.audio_path ? `<audio id="session-audio" controls src="file://${s.audio_path}" class="w-full" style="height:38px"></audio><div class="mt-2 text-xs text-zinc-500 truncate">${esc(mediaName)}</div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
-          ${s.screen_path ? `<div class="mt-4 text-xs text-zinc-400 mb-1"><i class="fa-solid fa-desktop mr-1"></i>Screen capture</div><video id="session-screen" controls src="file://${s.screen_path}" class="w-full rounded-xl bg-black max-h-64"></video>` : ''}
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div class="font-semibold">Recording</div>
+            ${s.audio_path ? `<button id="wave-play-${s.id}" onclick="toggleSessionWaveform('${s.id}')" class="rounded-xl bg-white px-3 py-1.5 text-xs font-semibold text-black"><i class="fa-solid fa-play mr-1"></i>Play</button>` : ''}
+          </div>
+          ${s.audio_path ? `
+            <div id="waveform-${s.id}" class="min-h-[86px] rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-3"></div>
+            <audio id="session-audio" controls src="${filePathToUrl(s.audio_path)}" class="mt-3 w-full" style="height:38px"></audio>
+            <div class="mt-2 flex items-center justify-between gap-2 text-xs text-zinc-500">
+              <span class="truncate">${esc(mediaName)}</span>
+              <span id="wave-time-${s.id}" class="font-mono text-cyan-300">00:00</span>
+            </div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
+          ${s.screen_path ? `<div class="mt-4 text-xs text-zinc-400 mb-1"><i class="fa-solid fa-desktop mr-1"></i>Screen capture</div><video id="session-screen" controls src="${filePathToUrl(s.screen_path)}" class="w-full rounded-xl bg-black max-h-64"></video>` : ''}
         </div>
 
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
@@ -721,6 +789,7 @@ async function openSession(id) {
       </aside>
     </div>
   `;
+  if (s.audio_path) setTimeout(() => initSessionWaveform(s.id, s.audio_path, highlights), 80);
 }
 
 async function editSessionTitle(id) {
@@ -765,8 +834,67 @@ window.switchSessionReviewTab = function(sessionId, tab) {
   }
 };
 
+function initSessionWaveform(sessionId, audioPath, highlights = []) {
+  const container = document.getElementById(`waveform-${sessionId}`);
+  if (!container || !audioPath || !window.WaveSurfer) return;
+  try { if (_sessionWaveforms[sessionId]) _sessionWaveforms[sessionId].destroy(); } catch (e) {}
+  container.innerHTML = '';
+  const ws = WaveSurfer.create({
+    container,
+    url: filePathToUrl(audioPath),
+    height: 74,
+    waveColor: 'rgba(45,212,191,.35)',
+    progressColor: '#22d3ee',
+    cursorColor: '#f87171',
+    cursorWidth: 2,
+    barWidth: 2,
+    barGap: 2,
+    barRadius: 3,
+    normalize: true
+  });
+  _sessionWaveforms[sessionId] = ws;
+  const playBtn = document.getElementById(`wave-play-${sessionId}`);
+  const timeEl = document.getElementById(`wave-time-${sessionId}`);
+  const setButton = () => {
+    if (!playBtn) return;
+    playBtn.innerHTML = ws.isPlaying()
+      ? '<i class="fa-solid fa-pause mr-1"></i>Pause'
+      : '<i class="fa-solid fa-play mr-1"></i>Play';
+  };
+  ws.on('play', setButton);
+  ws.on('pause', setButton);
+  ws.on('finish', setButton);
+  ws.on('timeupdate', (t) => {
+    if (timeEl) timeEl.textContent = `${String(Math.floor(t / 60)).padStart(2,'0')}:${String(Math.floor(t % 60)).padStart(2,'0')}`;
+  });
+  ws.on('error', (err) => {
+    console.warn('Waveform failed', err);
+    container.innerHTML = '<div class="text-xs text-zinc-500 p-3">Waveform unavailable. Native audio controls still work below.</div>';
+  });
+}
+
+window.toggleSessionWaveform = function(sessionId) {
+  const ws = _sessionWaveforms[sessionId];
+  if (ws) {
+    ws.playPause();
+    return;
+  }
+  const a = document.getElementById('session-audio');
+  if (a) {
+    if (a.paused) a.play().catch(() => {});
+    else a.pause();
+  }
+};
+
 // Jump the session recording (audio + screen) to a highlight's timestamp and play.
 window.seekRecording = function(seconds) {
+  const activeWave = Object.values(_sessionWaveforms).find(Boolean);
+  if (activeWave && activeWave.getDuration && activeWave.getDuration()) {
+    try {
+      activeWave.setTime(seconds);
+      activeWave.play();
+    } catch (e) {}
+  }
   const a = document.getElementById('session-audio');
   const v = document.getElementById('session-screen');
   let seeked = false;
@@ -1286,7 +1414,7 @@ async function renderLiveRoom(session) {
   // Always clear any existing timer before starting a new one
   if (_globalTimerInterval) { clearInterval(_globalTimerInterval); _globalTimerInterval = null; }
 
-  const modeLabel = session.mode === 'manual' ? 'Manual Session' : 'Room Session';
+  const modeLabel = session.mode === 'manual' ? 'Manual Session' : session.mode === 'duo' ? 'Duo Link Session' : 'Room Session';
   const isRoom = session.mode !== 'manual';
   const isDuo = session.mode === 'duo';
   const duoConnected = isDuo && peerStatus && peerStatus.status === 'connected';
@@ -1303,6 +1431,7 @@ async function renderLiveRoom(session) {
     <div class="min-h-full grid 2xl:grid-cols-[1fr_300px] gap-4">
       <section class="rounded-[28px] border ${isDuo ? 'border-emerald-500/30' : 'border-zinc-700/50'} bg-[#0b0f1d]/90 p-6 overflow-hidden">
         ${duoBanner}
+        ${renderDuoParticipantStrip(session, duoConnected)}
         <div class="grid 2xl:grid-cols-[1fr_360px] gap-5">
           <div>
             <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2"><i class="fa-solid fa-users mr-2"></i>${modeLabel}</div>
@@ -1316,7 +1445,7 @@ async function renderLiveRoom(session) {
             </div>
             <div id="live-timer" class="font-mono text-6xl text-red-400 tracking-tighter mb-2">00:00</div>
             <div id="mic-status" class="hidden"></div>
-            <div class="h-7 overflow-hidden mb-4 text-red-400/80 text-xs tracking-[3px] whitespace-nowrap">--- ----- -- ------- --- ---- ----- -- ------- --- ----</div>
+            <canvas id="live-waveform" width="720" height="54" class="mb-4 h-14 w-full rounded-2xl border border-red-400/20 bg-red-500/5"></canvas>
           </div>
 
           <div class="grid sm:grid-cols-[150px_1fr] gap-4">
@@ -1362,7 +1491,7 @@ async function renderLiveRoom(session) {
           <div id="live-highlights-panel" style="display:none" class="min-h-[120px] text-sm text-zinc-300 p-2">
             <div class="text-xs text-zinc-500">No highlights yet - use Mark Idea, Mark Task, or Decision buttons to tag moments.</div>
           </div>
-          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">---- ------- ---- ----- --- ------- ---- ----- ---</div>
+          <canvas id="transcript-waveform" width="900" height="42" class="mt-3 h-10 w-full rounded-xl bg-cyan-500/5"></canvas>
         </div>
 
         <div class="mt-4 grid md:grid-cols-5 gap-3">
@@ -1412,6 +1541,23 @@ async function renderLiveRoom(session) {
       </aside>
     </div>
   `;
+
+  if (isDuo && duoConnected) {
+    setTimeout(() => {
+      sendPeerJson({
+        type: 'duo-command',
+        command: 'session-state',
+        state: 'recording',
+        peerName: getProfileNameFallback(),
+        session: {
+          title: session.title,
+          mode: session.mode,
+          started_at: session.started_at || Date.now(),
+          projectName: currentProject ? currentProject.name : 'Linked Project'
+        }
+      });
+    }, 80);
+  }
 
   // Timer (always) - stored globally so repeated calls don't stack intervals
   const start = Date.now();
@@ -1838,8 +1984,33 @@ async function renderLiveRoom(session) {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(micStream);
       analyser = audioContext.createAnalyser();
-      analyser.fftSize = 32;
+      analyser.fftSize = 1024;
       source.connect(analyser);
+
+      const liveWave = document.getElementById('live-waveform');
+      const liveWaveCtx = liveWave ? liveWave.getContext('2d') : null;
+      const transcriptWave = document.getElementById('transcript-waveform');
+      const transcriptWaveCtx = transcriptWave ? transcriptWave.getContext('2d') : null;
+
+      function drawWave(canvasEl, waveCtx, stroke, fill) {
+        if (!canvasEl || !waveCtx || !analyser) return;
+        const data = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(data);
+        waveCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+        waveCtx.fillStyle = fill;
+        waveCtx.fillRect(0, 0, canvasEl.width, canvasEl.height);
+        waveCtx.lineWidth = 2;
+        waveCtx.strokeStyle = stroke;
+        waveCtx.beginPath();
+        const slice = canvasEl.width / data.length;
+        for (let i = 0; i < data.length; i++) {
+          const x = i * slice;
+          const y = (data[i] / 255) * canvasEl.height;
+          if (i === 0) waveCtx.moveTo(x, y);
+          else waveCtx.lineTo(x, y);
+        }
+        waveCtx.stroke();
+      }
 
       function drawMeter() {
         if (!isRecording || !analyser || !ctx) return;
@@ -1859,6 +2030,8 @@ async function renderLiveRoom(session) {
           ctx.fillStyle = i < active ? '#2dd4bf' : 'rgba(148,163,184,0.13)';
           ctx.fillRect(x, y, barW, h);
         }
+        drawWave(liveWave, liveWaveCtx, 'rgba(248,113,113,.95)', 'rgba(248,113,113,.03)');
+        drawWave(transcriptWave, transcriptWaveCtx, 'rgba(34,211,238,.85)', 'rgba(34,211,238,.03)');
         requestAnimationFrame(drawMeter);
       }
       drawMeter();
@@ -2071,6 +2244,7 @@ async function renderShareView(content, actionsEl) {
         <div><div class="text-xs uppercase tracking-[.18em] text-emerald-300">Link Control</div><div class="mt-1 text-2xl font-semibold text-white">Both apps are linked</div><div class="mt-1 text-sm text-zinc-400">Control is for shared navigation and Duo session invites. Remote data lives in Remote Vault. Files live in Link Vault.</div></div>
         <button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button>
       </div>
+      ${_duoPeerLiveState && _duoPeerLiveState.state === 'recording' ? `<div class="mt-5 rounded-3xl border border-red-400/35 bg-red-500/10 p-5"><div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div><div class="text-xs uppercase tracking-[.16em] text-red-300"><i class="fa-solid fa-circle fa-beat mr-2"></i>${esc(_duoPeerLiveState.peerName || 'Linked PC')} is recording</div><div class="mt-1 text-xl font-semibold text-white">${esc(_duoPeerLiveState.session?.title || 'Linked Session')}</div><div class="mt-1 text-sm text-zinc-400">Join this session on your side so both recordings share the same start time and review flow.</div></div><button onclick="showLinkedSessionInvite(_duoPeerLiveState.session)" class="rounded-2xl bg-red-600 px-5 py-3 text-sm font-semibold text-white hover:bg-red-500"><i class="fa-solid fa-headphones mr-2"></i>Join Recording</button></div></div>` : ''}
       ${window._pendingDuoSession ? `<div class="mt-5 rounded-3xl border border-emerald-400/40 bg-emerald-500/10 p-5 shadow-lg shadow-emerald-950/30"><div class="text-xs uppercase tracking-[.16em] text-emerald-300">Ready to invite</div><div class="mt-1 text-xl font-semibold text-emerald-100">Start this Duo session on both PCs</div><div class="mt-1 text-sm text-zinc-300">This sends Nick/Dylan a full-screen Join Session popup for "${esc(window._pendingDuoSession.title)}", then starts recording on your side.</div><button onclick="startPendingLinkedSession()" class="mt-4 w-full rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500"><i class="fa-solid fa-paper-plane mr-2"></i>Send Join Popup + Start My Side</button></div>` : ''}
       <div class="mt-5 grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
         <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div><div class="font-semibold text-white">Mirror a tab</div><div class="text-xs text-zinc-500">Click a tab and the other person jumps there too.</div></div><span class="rounded-full border border-cyan-500/30 px-3 py-1 text-[11px] text-cyan-300">Shared control</span></div><div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">${mirrorButtons}</div></div>
@@ -2371,7 +2545,30 @@ async function handlePeerTextPayload(raw) {
         await showLinkedSessionInvite(data.session);
         return true;
       }
+      if (data.command === 'session-state' && data.session) {
+        _duoPeerLiveState = {
+          state: data.state || 'recording',
+          peerName: data.peerName || 'Linked PC',
+          session: data.session,
+          at: Date.now()
+        };
+        if (!_activeLiveSession || !_activeLiveSession.recording) {
+          showToast(`${_duoPeerLiveState.peerName} is recording - join from Link or accept the popup`);
+          await showLinkedSessionInvite(data.session);
+        } else if (currentView === 'live') {
+          const c = document.getElementById('main-content');
+          if (c) {
+            const stateEl = document.getElementById('duo-peer-state-label');
+            if (stateEl) stateEl.innerHTML = '<i class="fa-solid fa-circle fa-beat mr-1"></i>Recording';
+          }
+        }
+        if (currentView === 'share') {
+          renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
+        }
+        return true;
+      }
       if (data.command === 'session-ended') {
+        if (_duoPeerLiveState) _duoPeerLiveState.state = 'ended';
         const activeId = _activeLiveSession && _activeLiveSession.id;
         if (activeId) {
           _duoPeerSessionNotes[activeId] = {
