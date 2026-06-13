@@ -18,7 +18,7 @@ Built for real workflows between you and your collaborator (e.g. Jayton + Nick).
 - **Live Recording Sessions**: Room (local mic + screen/window picker with system audio + live preview, level meter, big "RECORDING" overlay + draggable pill), Duo/Link (WebSocket peer over LAN), or Manual notes. **Live Convo/Transcript** with real-time typewriter speech-to-text. Mark decisions/tasks/ideas live via button menu. **Resume / continue any previous session** anytime (multi-visit support) — new recordings save as timestamped segments, notes + transcript append. Audio/video playback in detail. Full date/time tracking (start, end, duration) in lists and detail.
 - **Decision Vault, Tasks & Timeline**: Track choices, action items, and full history. Convert ideas ↔ tasks/decisions.
 - **Project Memory**: Local search across everything + Ollama-powered chat that only uses your real data (no hallucinations). Save useful answers.
-- **Share with Nick (real P2P)**: Host/Join over local network (no internet). Send notes, files, bundles. Received items saved locally with reveal. Clear instructions + firewall troubleshooting built in.
+- **Link with collaborators (real P2P)**: Host/Join over local network (no internet). Send notes, files, bundles. Received items saved locally with reveal. Clear instructions + firewall troubleshooting built in.
 - **In-App Publishing (for repo owner)**: In Settings > Updates, sign in with gh CLI (persists), auto-detects DEV/owner account, one-click build portable + publish real GitHub release with the .exe attached. "CHECK FOR UPDATE" for everyone else.
 - **Ollama AI Integration**: Local-only. Smart naming, summaries, task/decision extraction, memory chat, model pull/install helpers, warnings for disk/RAM. Works offline.
 - **Exports & Folders**: Real files in `%APPDATA%\VibeForge\exports\...` (not just browser downloads). Reveal buttons everywhere. Markdown, JSON, Grok prompts.
@@ -32,7 +32,7 @@ Built for real workflows between you and your collaborator (e.g. Jayton + Nick).
 3. Create a project → New Session (Room / Duo / Manual).
 4. Capture ideas fast with the green **Capture Idea** button (sidebar + sessions header).
 5. Use Project Memory for search + AI chat.
-6. Share tab for LAN collab with your partner.
+6. Link tab for room-code collaboration with your partner.
 7. (Owner) Settings → Updates tab → sign in with gh → Build & Publish releases directly.
 
 **For collaborators**: Just use the portable. The "CHECK FOR UPDATE" button in Settings > Updates keeps you in sync with releases from the owner.
@@ -66,19 +66,19 @@ Tech: Electron 30, better-sqlite3, ws (real LAN peer), MediaRecorder for audio, 
 
 All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibling folders.
 
-## 🤝 Collaboration (Share with Partner)
+## Collaboration (Link with Partner)
 
-- Both on same Wi-Fi/LAN.
-- One clicks Host in Share tab → tells the other the address.
-- Other pastes into Join.
-- Send notes, exported bundles, files. Everything lands in local `received\` folder with reveal.
-- Windows Firewall note + troubleshooting built into the UI.
+- Open Link, then Host to generate a room code.
+- The other person opens Link, pastes the code, and clicks Join.
+- Once connected, both apps can mirror tabs, send a test ping, send latest session notes, and transfer files.
+- Use "Open Tester Window" to simulate a second person on one PC before testing with Nick or Dylan.
+- Received files land in the local `received\` folder with reveal.
 
-No servers, no accounts, no internet required for core use.
+No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer connection.
 
-## Recent Fixes (v0.4.1)
+## Recent Fixes (v0.4.2)
 
-- Duo test flow: Share tab now has a built-in "Open Tester Window" button. Host in the main window, join from the tester window, and send notes/files to prove the two-person PeerJS/WebRTC link works before testing with Nick or Dylan.
+- Link workspace: Share is now Link. It has Host/Join, a one-PC tester window, connected-state controls, mirrored tabs, ping, latest-notes send, file send, and a clearer flow for Duo sessions.
 - Launch is hardened: launch.bat no longer force-rebuilds better-sqlite3 every run, preventing the EPERM native-module crash when Electron still has the .node file locked.
 - Update checks normalize tags like v4 to 0.4.0 so accidental GitHub release names do not confuse the app.
 - Continue/resume sessions: Resume Live buttons reopen the same session with previous notes/transcript and save new timestamped recording segments.
@@ -91,7 +91,7 @@ No servers, no accounts, no internet required for core use.
 
 - Everyone gets a big CHECK FOR UPDATE in Settings.
 - Owner uses the same tab for real publishing.
-- Current recommended release: v0.4.1 or newer.
+- Current recommended release: v0.4.2 or newer.
 
 ## Philosophy
 

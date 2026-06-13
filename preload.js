@@ -54,10 +54,10 @@ const api = {
   getStorageStatus: () => ipcRenderer.invoke('get-storage-status'),
   revealStorage: () => ipcRenderer.invoke('reveal-storage'),
 
-  // File pick (for future share/assets)
+  // File pick (for future link/assets)
   pickFile: () => ipcRenderer.invoke('pick-file'),
 
-  // Duo / Share (IPC stubs — real PeerJS connection is managed in renderer.js
+  // Duo / Link (IPC stubs — real PeerJS connection is managed in renderer.js
   // where WebRTC is available; these just satisfy any legacy call sites)
   duoHost: () => ipcRenderer.invoke('duo-host'),
   duoJoin: (address) => ipcRenderer.invoke('duo-join', address),

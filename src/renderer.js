@@ -63,18 +63,7 @@ async function init() {
 
   if (window.vibeforge.onPeerMessage) {
     window.vibeforge.onPeerMessage((msg) => {
-      try {
-        const data = JSON.parse(msg);
-        if (data.type === 'session-notes') {
-          receivedItems.push({ type: 'notes', title: data.title, content: data.notes });
-          if (currentView === 'share') {
-            renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
-          }
-          showToast('Received session notes from peer');
-        }
-      } catch (e) {
-        console.log('Peer message:', msg);
-      }
+      handlePeerTextPayload(msg);
     });
   }
 
@@ -333,7 +322,7 @@ async function switchView(view) {
     return;
   }
 
-  header.textContent = view.charAt(0).toUpperCase() + view.slice(1);
+  header.textContent = view === 'share' ? 'Link' : view.charAt(0).toUpperCase() + view.slice(1);
 
   if (view === 'sessions') await renderSessionsView(content, actions);
   else if (view === 'decisions') await renderDecisionsView(content, actions);
@@ -1800,13 +1789,13 @@ async function renderLiveRoom(session) {
   // the late assignments were removed to avoid duplication)
 }
 
-// 7. Duo Setup - redirects to the Share tab (PeerJS room-code based)
+// 7. Duo Setup - redirects to the Link tab (PeerJS room-code based)
 // The old IP-based WebSocket UI is replaced. Duo sessions now use the
-// Share tab's Generate Room Code / Join flow which works over the internet.
+// Link tab's Generate Room Code / Join flow which works over the internet.
 async function renderDuoSetup(session) {
-  // Store the session so the Share tab can start recording once linked
+  // Store the session so the Link tab can start recording once linked
   window._pendingDuoSession = session;
-  showToast('Use "Generate Room Code" to link, then recording will start.');
+  showToast('Use Link to host/join. Once connected, start this Duo session from there.');
   await switchView('share');
 }
 
@@ -1828,102 +1817,116 @@ async function renderShareView(content, actionsEl) {
     : isHosting || isConnecting
     ? 'bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,.65)]'
     : 'bg-zinc-500';
-  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting - waiting for join' : isConnecting ? 'Connecting' : 'Offline';
+  const statusLabel = isConnected ? 'Linked live' : isHosting ? 'Hosting - waiting' : isConnecting ? 'Connecting' : 'Offline';
+  const connectionCopy = isConnected
+    ? 'You are connected. Use shared controls to move both apps together and send session payloads.'
+    : 'Host from one app, join from the other, then use the connected workspace together.';
 
   const receivedHtml = receivedItems.length ? receivedItems.map(item => {
     const label = `${item.type || 'item'}: ${item.title || item.name || item.path || ''}`;
     const safePath = item.path ? item.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'") : '';
     return `
-      <div class="flex items-center justify-between gap-2 rounded-xl border border-white/5 bg-white/[.03] px-3 py-2 text-xs">
+      <div class="flex items-center justify-between gap-2 rounded-2xl border border-white/5 bg-white/[.04] px-3 py-2 text-xs">
         <span class="min-w-0 truncate text-zinc-300">${esc(label)}</span>
-        ${item.path ? `<button onclick="revealSpecificReceived('${safePath}')" class="shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-cyan-300 hover:bg-zinc-800">Reveal</button>` : ''}
+        ${item.path ? `<button onclick="revealSpecificReceived('${safePath}')" class="shrink-0 rounded-xl border border-zinc-700 px-2 py-1 text-[11px] text-cyan-300 hover:bg-zinc-800">Reveal</button>` : ''}
       </div>`;
-  }).join('') : `<div class="rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">Nothing received yet.</div>`;
+  }).join('') : `<div class="rounded-2xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">Nothing received yet.</div>`;
+
+  const mirrorButtons = [
+    ['sessions', 'Sessions', 'fa-list'],
+    ['ideas', 'Ideas', 'fa-lightbulb'],
+    ['tasks', 'Tasks', 'fa-tasks'],
+    ['decisions', 'Decisions', 'fa-gavel'],
+    ['timeline', 'Timeline', 'fa-stream'],
+    ['memory', 'Memory', 'fa-search']
+  ].map(([view, label, icon]) => `
+    <button onclick="mirrorViewToPeer('${view}')" class="rounded-2xl border border-zinc-700 bg-zinc-950/60 px-3 py-3 text-sm text-zinc-100 hover:border-cyan-400 hover:bg-cyan-500/10">
+      <i class="fa-solid ${icon} mr-2 text-cyan-300"></i>${label}
+    </button>`).join('');
+
+  const connectedWorkspace = isConnected ? `
+    <section class="rounded-[30px] border border-emerald-500/25 bg-emerald-500/10 p-5">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-[.18em] text-emerald-300">Connected workspace</div>
+          <div class="mt-1 text-2xl font-semibold text-white">Both apps are linked</div>
+          <div class="mt-1 text-sm text-zinc-400">This is where Link starts feeling like the same app for both people: mirror tabs, send session context, and launch the Duo session once both sides are ready.</div>
+        </div>
+        <button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button>
+      </div>
+
+      ${window._pendingDuoSession ? `
+        <div class="mt-5 rounded-3xl border border-emerald-400/30 bg-black/30 p-5">
+          <div class="font-semibold text-emerald-100">Duo session ready</div>
+          <div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are linked.</div>
+          <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button>
+        </div>` : ''}
+
+      <div class="mt-5 grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
+        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
+          <div class="flex items-center justify-between gap-3">
+            <div><div class="font-semibold text-white">Mirror a tab</div><div class="text-xs text-zinc-500">Click a tab and the other person jumps there too.</div></div>
+            <span class="rounded-full border border-cyan-500/30 px-3 py-1 text-[11px] text-cyan-300">Shared control</span>
+          </div>
+          <div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">${mirrorButtons}</div>
+        </div>
+
+        <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
+          <div class="font-semibold text-white">Send workspace payload</div>
+          <div class="mt-1 text-xs text-zinc-500">Quick proof that data moves through the Link.</div>
+          <div class="mt-4 grid gap-2">
+            <button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-note-sticky mr-2 text-purple-300"></i>Send latest session notes</button>
+            <button onclick="sendExportedBundle()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-file-arrow-up mr-2 text-cyan-300"></i>Send a file</button>
+            <button onclick="sendLinkPing()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-satellite-dish mr-2 text-emerald-300"></i>Send test ping</button>
+          </div>
+        </div>
+      </div>
+    </section>` : '';
 
   content.innerHTML = `
-    <div class="space-y-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <div class="flex items-center gap-2 text-xs uppercase tracking-[.18em] text-cyan-300">
-            <span class="h-2 w-2 rounded-full ${statusClass}"></span>
-            Duo Link ${isTester ? '<span class="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-200">Tester Window</span>' : ''}
+    <div class="space-y-5">
+      <div class="relative overflow-hidden rounded-[32px] border border-zinc-800 bg-[#080b15] p-6 shadow-2xl">
+        <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_0%,rgba(124,58,237,.22),transparent_32%),radial-gradient(circle_at_85%_10%,rgba(6,182,212,.18),transparent_34%)]"></div>
+        <div class="relative flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div class="flex items-center gap-2 text-xs uppercase tracking-[.18em] text-cyan-300">
+              <span class="h-2 w-2 rounded-full ${statusClass}"></span>
+              Link ${isTester ? '<span class="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-200">Tester Window</span>' : ''}
+            </div>
+            <div class="mt-2 text-4xl font-semibold tracking-normal text-white">Link workspace</div>
+            <div class="mt-2 max-w-3xl text-sm text-zinc-400">${connectionCopy}</div>
           </div>
-          <div class="mt-2 text-3xl font-semibold tracking-normal text-white">Test 2-person connection</div>
-          <div class="mt-1 max-w-2xl text-sm text-zinc-400">Open a second tester window, host from one side, join from the other, then send notes or a file to prove the link works before Nick or Dylan tries it.</div>
-        </div>
-        <div class="rounded-2xl border border-zinc-800 bg-zinc-950/70 px-4 py-3 text-sm">
-          <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Status</div>
-          <div class="mt-1 flex items-center gap-2 font-medium text-white"><span class="h-2.5 w-2.5 rounded-full ${statusClass}"></span>${esc(statusLabel)}</div>
+          <div class="rounded-3xl border border-zinc-800 bg-black/35 px-5 py-4">
+            <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Connection</div>
+            <div class="mt-1 flex items-center gap-2 text-lg font-semibold text-white"><span class="h-3 w-3 rounded-full ${statusClass}"></span>${esc(statusLabel)}</div>
+          </div>
         </div>
       </div>
 
-      <div class="grid gap-4 xl:grid-cols-[1fr_340px]">
-        <section class="rounded-[28px] border border-zinc-800 bg-[#090b13] p-5 shadow-2xl">
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div class="rounded-3xl border border-purple-500/25 bg-purple-500/10 p-5">
-              <div class="flex items-center gap-3">
-                <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-purple-500/20 text-purple-200"><i class="fa-solid fa-tower-broadcast"></i></div>
-                <div><div class="font-semibold text-white">Host</div><div class="text-xs text-zinc-400">This window generates a room code.</div></div>
-              </div>
-              <div class="mt-4 rounded-2xl border border-zinc-800 bg-black/30 p-4">
-                <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Room Code</div>
-                <div class="mt-2 flex min-h-[40px] items-center gap-2">
-                  <div class="min-w-0 flex-1 truncate font-mono text-2xl font-semibold text-purple-200">${roomCode ? esc(roomCode) : 'not hosting'}</div>
-                  ${roomCode ? `<button onclick="copyPeerAddress()" class="rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black">Copy</button>` : ''}
-                </div>
-                <div class="mt-2 text-xs text-zinc-500">${isHosting ? 'Waiting for the other window/person to join.' : isConnected ? 'Connected. You can send notes/files below.' : 'Click Host to create a test code.'}</div>
-              </div>
-              <div class="mt-4 flex gap-2">
-                ${isHosting || isConnected ? `<button onclick="duoDisconnectFromShare()" class="flex-1 rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 hover:bg-zinc-800">Disconnect</button>` : `<button onclick="hostFromShare(this)" class="flex-1 rounded-2xl bg-purple-600 py-3 text-sm font-semibold text-white hover:bg-purple-500">Host / Generate Code</button>`}
-              </div>
-            </div>
+      ${connectedWorkspace}
 
-            <div class="rounded-3xl border border-cyan-500/25 bg-cyan-500/10 p-5">
-              <div class="flex items-center gap-3">
-                <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/20 text-cyan-200"><i class="fa-solid fa-plug-circle-bolt"></i></div>
-                <div><div class="font-semibold text-white">Join</div><div class="text-xs text-zinc-400">Paste the host code in the other window.</div></div>
-              </div>
-              <div class="mt-4">
-                <input id="join-addr-main" placeholder="paste code like forge-4829" class="w-full rounded-2xl border border-zinc-700 bg-black/35 px-4 py-3 font-mono text-sm text-white outline-none focus:border-cyan-400" onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)">
-                <button onclick="doJoinFromShare(this)" class="mt-3 w-full rounded-2xl bg-cyan-600 py-3 text-sm font-semibold text-white hover:bg-cyan-500">Join Code</button>
-              </div>
-              <div class="mt-3 text-xs text-zinc-500">For one-PC testing: Host in main window, click "Open Tester Window", then paste the code there.</div>
+      <div class="grid gap-4 xl:grid-cols-[1fr_350px]">
+        <section class="grid gap-4 lg:grid-cols-2">
+          <div class="rounded-[28px] border border-purple-500/25 bg-purple-500/10 p-5">
+            <div class="flex items-center gap-3"><div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-purple-500/20 text-purple-200"><i class="fa-solid fa-tower-broadcast"></i></div><div><div class="font-semibold text-white">Host</div><div class="text-xs text-zinc-400">Creates the room code.</div></div></div>
+            <div class="mt-4 rounded-2xl border border-zinc-800 bg-black/30 p-4">
+              <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Room Code</div>
+              <div class="mt-2 flex min-h-[42px] items-center gap-2"><div class="min-w-0 flex-1 truncate font-mono text-2xl font-semibold text-purple-200">${roomCode ? esc(roomCode) : 'not hosting'}</div>${roomCode ? `<button onclick="copyPeerAddress()" class="rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black">Copy</button>` : ''}</div>
+              <div class="mt-2 text-xs text-zinc-500">${isHosting ? 'Waiting for the other person to join.' : isConnected ? 'Connected. Shared controls are above.' : 'Click Host to create a test code.'}</div>
             </div>
+            <div class="mt-4 flex gap-2">${isHosting || isConnected ? `<button onclick="duoDisconnectFromShare()" class="flex-1 rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 hover:bg-zinc-800">Disconnect</button>` : `<button onclick="hostFromShare(this)" class="flex-1 rounded-2xl bg-purple-600 py-3 text-sm font-semibold text-white hover:bg-purple-500">Host / Generate Code</button>`}</div>
           </div>
 
-          ${isConnected && window._pendingDuoSession ? `
-            <div class="mt-4 rounded-3xl border border-emerald-500/30 bg-emerald-500/10 p-5">
-              <div class="font-semibold text-emerald-200">Duo session is linked</div>
-              <div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are connected.</div>
-              <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Recording</button>
-            </div>` : ''}
-
-          ${isConnected ? `
-            <div class="mt-4 rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div><div class="font-semibold text-white">Send a test payload</div><div class="text-xs text-zinc-400">Use this to prove the connection is really working.</div></div>
-                <div class="flex gap-2"><button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Send Latest Notes</button><button onclick="sendExportedBundle()" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Send File</button></div>
-              </div>
-            </div>` : ''}
+          <div class="rounded-[28px] border border-cyan-500/25 bg-cyan-500/10 p-5">
+            <div class="flex items-center gap-3"><div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/20 text-cyan-200"><i class="fa-solid fa-plug-circle-bolt"></i></div><div><div class="font-semibold text-white">Join</div><div class="text-xs text-zinc-400">Paste the host code.</div></div></div>
+            <div class="mt-4"><input id="join-addr-main" placeholder="paste code like forge-4829" class="w-full rounded-2xl border border-zinc-700 bg-black/35 px-4 py-3 font-mono text-sm text-white outline-none focus:border-cyan-400" onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)"><button onclick="doJoinFromShare(this)" class="mt-3 w-full rounded-2xl bg-cyan-600 py-3 text-sm font-semibold text-white hover:bg-cyan-500">Join Code</button></div>
+            <div class="mt-3 text-xs text-zinc-500">For one-PC testing: host in main, open tester window, paste code there.</div>
+          </div>
         </section>
 
         <aside class="space-y-4">
-          <div class="rounded-[24px] border border-cyan-500/25 bg-cyan-500/10 p-5">
-            <div class="font-semibold text-white">One-PC two-person test</div>
-            <div class="mt-2 text-sm text-zinc-400">This opens a second VibeForge window with its own PeerJS connection context. It acts like Nick/Dylan for testing.</div>
-            <button onclick="openDuoTestWindow()" class="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-zinc-200">Open Tester Window</button>
-            <div class="mt-4 space-y-2 text-xs text-zinc-400"><div><span class="text-cyan-300">1.</span> Main window: Host / Generate Code.</div><div><span class="text-cyan-300">2.</span> Tester window: paste code and Join.</div><div><span class="text-cyan-300">3.</span> Send notes or a file and check Received.</div></div>
-          </div>
-
-          <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5">
-            <div class="flex items-center justify-between gap-3"><div class="font-semibold text-white">Received</div><button onclick="revealReceivedFolder()" class="rounded-xl border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Open Folder</button></div>
-            <div class="mt-3 space-y-2">${receivedHtml}</div>
-          </div>
-
-          <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5 text-xs leading-6 text-zinc-400">
-            <div class="mb-2 font-semibold text-white">What this proves</div>
-            <div>- PeerJS loaded correctly.</div><div>- Host code is reachable.</div><div>- Join flow works.</div><div>- Data sends through WebRTC.</div><div>- Received files save locally.</div>
-          </div>
+          <div class="rounded-[24px] border border-cyan-500/25 bg-cyan-500/10 p-5"><div class="font-semibold text-white">One-PC two-person test</div><div class="mt-2 text-sm text-zinc-400">Opens another VibeForge window with its own PeerJS context. Treat it like Nick/Dylan.</div><button onclick="openDuoTestWindow()" class="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-zinc-200">Open Tester Window</button><div class="mt-4 space-y-2 text-xs text-zinc-400"><div><span class="text-cyan-300">1.</span> Main: Host / Generate Code.</div><div><span class="text-cyan-300">2.</span> Tester: paste code and Join.</div><div><span class="text-cyan-300">3.</span> Use shared controls above.</div></div></div>
+          <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div class="font-semibold text-white">Received</div><button onclick="revealReceivedFolder()" class="rounded-xl border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Open Folder</button></div><div class="mt-3 space-y-2">${receivedHtml}</div></div>
         </aside>
       </div>
     </div>
@@ -2028,6 +2031,63 @@ window.sendExportedBundle = async function() {
     }
   }
 };
+
+async function sendPeerJson(payload) {
+  const msg = JSON.stringify(payload);
+  const res = window.vibePeer ? await window.vibePeer.peerSendText(msg) : await window.vibeforge.peerSendText(msg);
+  if (!res || !res.ok) showToast('Link send failed: ' + (res ? res.error : 'not connected'));
+  return res;
+}
+
+window.mirrorViewToPeer = async function(view) {
+  const allowed = ['sessions', 'ideas', 'tasks', 'decisions', 'timeline', 'memory'];
+  if (!allowed.includes(view)) return;
+  const res = await sendPeerJson({ type: 'duo-command', command: 'open-view', view });
+  if (res && res.ok) {
+    showToast('Mirrored tab: ' + view);
+    await switchView(view);
+  }
+};
+
+window.sendLinkPing = async function() {
+  const res = await sendPeerJson({ type: 'duo-command', command: 'ping', at: Date.now() });
+  if (res && res.ok) showToast('Ping sent through Link');
+};
+
+async function handlePeerTextPayload(raw) {
+  try {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!data || typeof data !== 'object') return false;
+
+    if (data.type === 'session-notes') {
+      receivedItems.push({ type: 'notes', title: data.title, content: data.notes });
+      if (currentView === 'share') {
+        renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
+      }
+      showToast('Received session notes from peer');
+      return true;
+    }
+
+    if (data.type === 'duo-command') {
+      if (data.command === 'open-view' && data.view) {
+        showToast('Link moved you to: ' + data.view);
+        await switchView(data.view);
+        return true;
+      }
+      if (data.command === 'ping') {
+        receivedItems.push({ type: 'ping', title: 'Link ping received' });
+        if (currentView === 'share') {
+          renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
+        }
+        showToast('Link ping received');
+        return true;
+      }
+    }
+  } catch (e) {
+    console.log('Peer message:', raw);
+  }
+  return false;
+}
 
 // Handle received files from peer (real path saved in main to received/)
 if (window.vibeforge.onPeerFile) {
@@ -3659,23 +3719,20 @@ async function refreshServiceStatus() {
   };
   try {
     const o = await window.vibeforge.ollamaStatus();
-    if (!o || !o.running) setDot('dot-ollama', 'gray', 'Ollama: offline — click to start it in AI Tools');
-    else if (!o.models || o.models.length === 0) setDot('dot-ollama', 'amber', 'Ollama: running, but no model pulled — click to pull one');
+    if (!o || !o.running) setDot('dot-ollama', 'gray', 'Ollama: offline - click to start it in AI Tools');
+    else if (!o.models || o.models.length === 0) setDot('dot-ollama', 'amber', 'Ollama: running, but no model pulled - click to pull one');
     else setDot('dot-ollama', 'green', `Ollama: ready (${o.models.length} model${o.models.length>1?'s':''})`);
   } catch (e) { setDot('dot-ollama', 'gray', 'Ollama: offline'); }
   try {
     const w = await window.vibeforge.whisperStatus();
     if (w && w.ready) setDot('dot-whisper', 'green', 'Whisper: ready (transcription + live captions)');
-    else setDot('dot-whisper', 'gray', 'Whisper: not set up — click to install in AI Tools');
+    else setDot('dot-whisper', 'gray', 'Whisper: not set up - click to install in AI Tools');
   } catch (e) { setDot('dot-whisper', 'gray', 'Whisper: not set up'); }
 }
 
 // ════════════════════════════════════════════════════════════════════
-// RENDERER-SIDE PEER MANAGER (v0.4.0)
-// PeerJS needs WebRTC which ONLY exists in Chromium (this renderer),
-// NOT in Node.js/main. This overrides the IPC stubs so Host and Join
-// actually work. Loaded after PeerJS CDN script in index.html.
-// ════════════════════════════════════════════════════════════════════
+// Renderer-side Peer manager. PeerJS needs WebRTC, which only exists in Chromium,
+// so the real Host/Join implementation lives here instead of main.js.
 (function initPeerManager() {
   let _peer = null, _conn = null, _peerJsId = null;
 
@@ -3699,20 +3756,14 @@ async function refreshServiceStatus() {
     _conn = conn;
     conn.on('open', () => {
       _setPeerStatus({ status: 'connected', roomCode: _peerJsId || conn.peer, address: conn.peer, type: role });
-      showToast('\u2705 Duo Link connected!');
+      showToast('Duo Link connected');
     });
     conn.on('data', (raw) => {
       if (typeof raw === 'string') {
-        try {
-          const obj = JSON.parse(raw);
-          if (obj && obj.type === 'session-notes') {
-            receivedItems.push({ type: 'notes', title: obj.title, content: obj.notes });
-            _setPeerStatus(peerStatus);
-            showToast('Received session notes from peer');
-            return;
-          }
-        } catch(e) {}
-        showToast('Message: ' + String(raw).slice(0, 60));
+        Promise.resolve(handlePeerTextPayload(raw)).then((handled) => {
+          if (handled) _setPeerStatus(peerStatus);
+          else showToast('Message: ' + String(raw).slice(0, 60));
+        });
       } else if (raw && raw.type === 'file-data') {
         window.vibeforge.saveReceivedFile(raw.name, raw.data).then(res => {
           if (res && res.ok) {
@@ -3736,7 +3787,7 @@ async function refreshServiceStatus() {
 
   window.vibePeer.duoHost = () => {
     if (typeof Peer === 'undefined') {
-      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Share after the app finishes loading.' });
+      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Link after the app finishes loading.' });
     }
     return new Promise((resolve) => {
       _cleanup();
@@ -3763,7 +3814,7 @@ async function refreshServiceStatus() {
 
   window.vibePeer.duoJoin = (roomCode) => {
     if (typeof Peer === 'undefined') {
-      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Share after the app finishes loading.' });
+      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Link after the app finishes loading.' });
     }
     return new Promise((resolve) => {
       _cleanup();
