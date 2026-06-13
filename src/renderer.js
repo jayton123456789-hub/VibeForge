@@ -211,9 +211,12 @@ async function showProjectMenu() {
   menu.innerHTML = html;
   document.body.appendChild(menu);
 
-  // Close on outside click (use capture phase, small delay to skip the opening click)
+  // Close on outside click (capture phase). Self-removes once the menu is gone
+  // (a menu item may remove the menu directly) so handlers never accumulate.
   const handler = (ev) => {
-    if (!menu.contains(ev.target) && ev.target.id !== 'project-header' && !document.getElementById('project-header')?.contains(ev.target)) {
+    if (!document.body.contains(menu)) { document.removeEventListener('click', handler, true); return; }
+    const header = document.getElementById('project-header');
+    if (!menu.contains(ev.target) && !(header && header.contains(ev.target))) {
       menu.remove();
       document.removeEventListener('click', handler, true);
     }
@@ -256,7 +259,8 @@ async function renameCurrentProject(el) {
 
 async function deleteCurrentProject(el) {
   el.parentNode.remove();
-  if (!currentProject || !confirm(`Delete project "${currentProject.name}" and all its data?`)) return;
+  if (!currentProject) return;
+  if (!await window.showConfirm(`Delete project "${currentProject.name}" and all its data?`, { okLabel: 'Delete project' })) return;
   await window.vibeforge.deleteProject(currentProject.id);
   projects = await window.vibeforge.getProjects();
   currentProject = projects[0] || null;
@@ -430,7 +434,7 @@ async function renderSessionsView(content, actionsEl) {
 }
 
 async function deleteSession(id, btn) {
-  if (!confirm('Delete this session?')) return;
+  if (!await window.showConfirm('Delete this session?')) return;
   await window.vibeforge.deleteSession(id);
   await switchView('sessions');
 }
@@ -595,7 +599,7 @@ async function editSessionTitle(id) {
 }
 
 async function deleteSessionFromDetail(id) {
-  if (!confirm('Delete this session?')) return;
+  if (!await window.showConfirm('Delete this session?')) return;
   await window.vibeforge.deleteSession(id);
   showToast('Session deleted');
   await switchView('sessions');
@@ -961,6 +965,7 @@ window.showInputModal = function(title, defaultValue = '', hint = '') {
 
     requestAnimationFrame(() => {
       setTimeout(() => {
+        try { window.focus(); } catch (e) {} // re-grab window focus (helps after any native dialog)
         input.focus({ preventScroll: true });
         if (defaultValue) input.select();
         else input.setSelectionRange(input.value.length, input.value.length);
@@ -1013,6 +1018,38 @@ window.hideInputModal = function() {
     inputModalResolve(null);
     inputModalResolve = null;
   }
+};
+
+// In-app confirm (replaces native window.confirm, which breaks input focus in
+// Electron renderers — after a native dialog closes, child <input>s often can't
+// regain keyboard focus until a reload. That was the "can't type the project
+// name after deleting a project" bug.)
+window.showConfirm = function(message, { okLabel = 'Delete', danger = true } = {}) {
+  return new Promise((resolve) => {
+    document.querySelectorAll('.vf-confirm').forEach(m => m.remove());
+    const modal = document.createElement('div');
+    modal.className = 'vf-confirm fixed inset-0 bg-black/70 flex items-center justify-center z-[400]';
+    const okColor = danger ? 'bg-red-600 hover:bg-red-500' : 'bg-white text-black';
+    modal.innerHTML = `
+      <div class="bg-[#111113] border border-zinc-700 rounded-3xl w-full max-w-md p-6">
+        <div class="text-base mb-6">${esc(message)}</div>
+        <div class="flex gap-3">
+          <button class="vf-cancel flex-1 py-2.5 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium">Cancel</button>
+          <button class="vf-ok flex-1 py-2.5 rounded-2xl ${okColor} text-sm font-semibold">${esc(okLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const done = (v) => { modal.remove(); resolve(v); };
+    modal.querySelector('.vf-ok').onclick = () => done(true);
+    modal.querySelector('.vf-cancel').onclick = () => done(false);
+    modal.onclick = (e) => { if (e.target === modal) done(false); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { document.removeEventListener('keydown', onKey, true); done(false); }
+      else if (e.key === 'Enter') { document.removeEventListener('keydown', onKey, true); done(true); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => { const b = modal.querySelector('.vf-ok'); if (b) b.focus(); }, 30);
+  });
 };
 
 window.confirmNewSession = async function() {
@@ -1910,7 +1947,7 @@ window.editDecision = async function(id) {
 };
 
 window.deleteDecision = async function(id) {
-  if (!confirm('Delete decision?')) return;
+  if (!await window.showConfirm('Delete decision?')) return;
   await window.vibeforge.deleteDecision(id);
   await switchView('decisions');
 };
@@ -1959,7 +1996,7 @@ window.addTaskModal = async function() {
   await switchView('tasks');
 };
 window.toggleTask = async function(id, current) { await window.vibeforge.updateTask({ id, status: current === 'open' ? 'done' : 'open' }); await switchView('tasks'); };
-window.deleteTask = async function(id) { if (confirm('Delete?')) { await window.vibeforge.deleteTask(id); await switchView('tasks'); } };
+window.deleteTask = async function(id) { if (await window.showConfirm('Delete this task?')) { await window.vibeforge.deleteTask(id); await switchView('tasks'); } };
 
 // === 1. IDEA VAULT QOL: filters (Inbox/Saved/Archived/Converted), rename, edit, convert, promote to decision, archive, delete, Smart Rename (Ollama only) ===
 let currentIdeaFilter = 'all';
@@ -2108,7 +2145,7 @@ window.convertIdea = async function(id) {
 };
 
 window.deleteIdea = async function(id) {
-  if (!confirm('Delete this idea?')) return;
+  if (!await window.showConfirm('Delete this idea?')) return;
   await window.vibeforge.deleteIdea(id);
   await switchView('ideas');
 };
