@@ -62,7 +62,7 @@ npm run rebuild
 npm run dist
 ```
 
-Tech: Electron 30, better-sqlite3, ws (real LAN peer), MediaRecorder for audio, Ollama HTTP API, Tailwind + Font Awesome (CDN for zero deps).
+Tech: Electron 30, better-sqlite3, ws (real LAN peer), MediaRecorder for audio, Ollama HTTP API, bundled Tailwind + Font Awesome for offline launch.
 
 All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibling folders.
 

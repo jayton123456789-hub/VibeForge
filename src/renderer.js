@@ -121,8 +121,8 @@ async function init() {
   } else {
     await switchView('sessions');
   }
-  // Keep the tour available from the sidebar, but do not auto-block the app with
-  // a full-screen overlay on launch. The previous auto-open made the UI feel unclickable.
+  // Show a friendly first-run welcome, then hand off to the guided tour.
+  setTimeout(() => showWelcomeThenTour(), 700);
 
   // Listen for peer updates (from main)
   if (window.vibeforge.onPeerStatus) {
@@ -265,6 +265,49 @@ function maybeShowFirstRunTour(force = false) {
   };
   window.addEventListener('resize', render, { once: true });
   render();
+}
+
+function showWelcomeThenTour() {
+  if (localStorage.getItem('vibeforge-tour-seen') === 'true') return;
+  if (document.getElementById('welcome-tour')) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'welcome-tour';
+  overlay.className = 'fixed inset-0 z-[690] flex items-center justify-center bg-black/55 backdrop-blur-sm';
+  overlay.innerHTML = `
+    <div class="w-[520px] max-w-[calc(100vw-32px)] rounded-[28px] border border-cyan-500/30 bg-[#090d18]/95 p-7 shadow-2xl shadow-black/70">
+      <div class="flex items-center gap-3 mb-5">
+        <img src="../assets/LOGO.png" class="h-12 w-12 rounded-2xl" alt="" onerror="this.style.display='none'">
+        <div>
+          <div class="text-[10px] uppercase tracking-[2px] text-cyan-300">Welcome</div>
+          <div class="text-2xl font-semibold">Hello from VibeForge</div>
+        </div>
+      </div>
+      <div class="space-y-3 text-base leading-7 text-zinc-300">
+        <p>This app is ready to use on this PC.</p>
+        <p>The setup wizard handles local AI dependencies like Ollama and Whisper. If you skipped it, you can finish setup later in Settings.</p>
+        <p>Next is a quick tour of the main buttons and where everything lives.</p>
+      </div>
+      <div class="mt-6 flex items-center gap-3">
+        <button id="welcome-skip" class="flex-1 rounded-2xl border border-zinc-700 py-2.5 text-sm text-zinc-200 hover:bg-zinc-800">Skip</button>
+        <button id="welcome-next" class="flex-1 rounded-2xl bg-white py-2.5 text-sm font-semibold text-black">Continue</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const startTour = () => {
+    overlay.remove();
+    setTimeout(() => maybeShowFirstRunTour(false), 150);
+  };
+
+  overlay.querySelector('#welcome-skip').onclick = () => {
+    localStorage.setItem('vibeforge-tour-seen', 'true');
+    overlay.remove();
+  };
+  overlay.querySelector('#welcome-next').onclick = () => {
+    startTour();
+  };
 }
 
 window.showFirstRunTour = function() {

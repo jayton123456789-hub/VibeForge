@@ -8,6 +8,26 @@ const WebSocket = require('ws');
 const os = require('os');
 const https = require('https');
 
+function writeLaunchLog(message, err) {
+  try {
+    const dir = app && app.getPath ? app.getPath('userData') : __dirname;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'launch-error.log'), [
+      new Date().toISOString(),
+      message,
+      err && (err.stack || err.message || String(err)),
+      ''
+    ].filter(Boolean).join('\n'), 'utf8');
+  } catch (e) {}
+}
+
+process.on('uncaughtException', (err) => {
+  writeLaunchLog('Uncaught exception during launch/runtime', err);
+});
+process.on('unhandledRejection', (err) => {
+  writeLaunchLog('Unhandled rejection during launch/runtime', err);
+});
+
 // === Portable self-update support (auto download on launch, clean old files, no clutter) ===
 const updateDir = path.join(app.getPath('userData'), 'update');
 if (fs.existsSync(updateDir)) {
@@ -114,6 +134,9 @@ function downloadFile(url, dest, onProgress) {
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
     });
+    req.setTimeout(60000, () => {
+      req.destroy(new Error(`Timed out downloading ${url}`));
+    });
     req.on('error', (e) => {
       file.close();
       try { fs.unlinkSync(dest); } catch (err) {}
@@ -122,9 +145,59 @@ function downloadFile(url, dest, onProgress) {
   });
 }
 
+function getOllamaExe() {
+  const fullPaths = [
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
+    'C:\\Program Files\\Ollama\\ollama.exe'
+  ];
+  for (const p of fullPaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return 'ollama';
+}
+
+function getOllamaCommand() {
+  const exe = getOllamaExe();
+  return exe.includes(' ') ? `"${exe}"` : exe;
+}
+
+function commandExists(command) {
+  return new Promise(resolve => {
+    exec(`where ${command}`, (err) => resolve(!err));
+  });
+}
+
+function checkOllamaInstalled() {
+  return new Promise(resolve => {
+    const exe = getOllamaExe();
+    const cmd = exe === 'ollama' ? 'ollama --version' : `"${exe}" --version`;
+    exec(cmd, (err, stdout) => {
+      resolve({ installed: !err, exe, version: (stdout || '').trim(), error: err ? err.message : null });
+    });
+  });
+}
+
+function runSetupProcess(command, args, onLog, options = {}) {
+  return new Promise(resolve => {
+    try {
+      const proc = spawn(command, args, {
+        shell: !!options.shell,
+        windowsHide: !!options.windowsHide
+      });
+      proc.stdout && proc.stdout.on('data', d => onLog && onLog(d.toString()));
+      proc.stderr && proc.stderr.on('data', d => onLog && onLog(d.toString()));
+      proc.on('close', code => resolve({ ok: code === 0, code }));
+      proc.on('error', err => resolve({ ok: false, error: err.message }));
+    } catch (err) {
+      resolve({ ok: false, error: err.message });
+    }
+  });
+}
+
 let mainWindow;
 let duoTestWindow = null;
 let db;
+let firstRunPending = false;
 let peerServer = null;
 let peerClient = null;
 let currentPeer = null; // { type: 'host' | 'client', address: string, ws: ws }
@@ -968,24 +1041,6 @@ function registerIpc() {
     return 'gh';
   }
 
-  // Raw executable path (no quotes) — for spawn() with an args array.
-  function getOllamaExe() {
-    const fullPaths = [
-      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
-      'C:\\Program Files\\Ollama\\ollama.exe'
-    ];
-    for (const p of fullPaths) {
-      if (fs.existsSync(p)) return p;
-    }
-    return 'ollama'; // rely on PATH
-  }
-
-  // Quoted command string — for exec()/shell string contexts.
-  function getOllamaCommand() {
-    const exe = getOllamaExe();
-    return exe.includes(' ') ? `"${exe}"` : exe;
-  }
-
   // One-call status for the UI green-lights: is Ollama up, and which models are pulled.
   ipcMain.handle('ollama-status', async () => {
     const url = getSetting('ollama_url') || 'http://127.0.0.1:11434';
@@ -1530,6 +1585,7 @@ function isFirstRun() {
 
 function markFirstRunComplete() {
   if (db) db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('first_run_complete', '1');
+  firstRunPending = false;
 }
 
 // Runs the full first-run setup pipeline asynchronously, streaming progress to the splash.
@@ -1542,8 +1598,10 @@ async function runFirstRunSetup() {
 
   const ollamaUrl = getSetting('ollama_url') || 'http://127.0.0.1:11434';
 
-  // Check if Ollama binary is present
-  const ollamaInstalled = await new Promise(r => exec('ollama --version', e => r(!e)));
+  // Check if Ollama binary is present. Do not rely only on PATH; fresh installs may
+  // not update PATH for this already-running process.
+  let ollamaCheck = await checkOllamaInstalled();
+  let ollamaInstalled = ollamaCheck.installed;
   // Check if Ollama server is already up
   let ollamaRunning = false;
   try {
@@ -1565,62 +1623,78 @@ async function runFirstRunSetup() {
   const whisperModel = getWhisperModelPath();
   const whisperReady = !!(whisperCli && fs.existsSync(whisperModel));
 
-  splashStep('deps', 'done', `Ollama installed: ${ollamaInstalled}, running: ${ollamaRunning}, model ready: ${modelPulled}, Whisper ready: ${whisperReady}\n`);
+  splashStep('deps', 'done', `Ollama installed: ${ollamaInstalled}${ollamaInstalled ? ` (${ollamaCheck.exe})` : ''}, running: ${ollamaRunning}, model ready: ${modelPulled}, Whisper ready: ${whisperReady}\n`);
   await sleep(300);
 
-  // ── Step 2: install Ollama if missing ────────────────────────────────────
+  // Step 2: install Ollama if missing
   if (!ollamaInstalled) {
-    splashStep('ollama', 'active', 'Ollama not found — installing via winget…\n');
-    const installResult = await new Promise((resolve) => {
-      const proc = spawn('winget', ['install', '--id', 'Ollama.Ollama', '-e',
+    splashStep('ollama', 'active', 'Ollama not found. Installing it for this Windows user...\n');
+    let installResult = { ok: false, error: 'winget not available' };
+    if (await commandExists('winget')) {
+      splashStep('ollama', 'active', 'Trying winget install: Ollama.Ollama\n');
+      installResult = await runSetupProcess('winget', ['install', '--id', 'Ollama.Ollama', '-e',
         '--accept-package-agreements', '--accept-source-agreements'],
-        { shell: true, windowsHide: true });
-      proc.stdout.on('data', d => splashStep('ollama', 'active', d.toString()));
-      proc.stderr.on('data', d => splashStep('ollama', 'active', d.toString()));
-      proc.on('close', code => resolve({ ok: code === 0, code }));
-      proc.on('error', err => resolve({ ok: false, error: err.message }));
-    });
-    if (installResult.ok) {
-      splashStep('ollama', 'done', 'Ollama installed successfully.\n');
+        d => splashStep('ollama', 'active', d), { shell: true, windowsHide: false });
     } else {
-      splashStep('ollama', 'error', `Ollama install failed (code ${installResult.code}). You can install it manually later from ollama.com\n`);
+      splashStep('ollama', 'active', 'winget is not available on this PC.\n');
+    }
+
+    ollamaCheck = await checkOllamaInstalled();
+    ollamaInstalled = ollamaCheck.installed;
+
+    if (!ollamaInstalled) {
+      splashStep('ollama', 'active', 'Trying Ollama official PowerShell installer...\n');
+      installResult = await runSetupProcess('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        'irm https://ollama.com/install.ps1 | iex'],
+        d => splashStep('ollama', 'active', d), { windowsHide: false });
+      ollamaCheck = await checkOllamaInstalled();
+      ollamaInstalled = ollamaCheck.installed;
+    }
+
+    if (ollamaInstalled) {
+      splashStep('ollama', 'done', `Ollama installed successfully: ${ollamaCheck.exe}\n`);
+    } else {
+      splashStep('ollama', 'error', `Ollama install did not complete (${installResult.error || `code ${installResult.code}`}). Install it later in Settings or from ollama.com/download/windows.\n`);
     }
   } else {
-    splashStep('ollama', 'done', 'Ollama already installed — skipping.\n');
+    splashStep('ollama', 'done', `Ollama already installed: ${ollamaCheck.exe}\n`);
   }
   await sleep(200);
 
-  // ── Step 3: start Ollama serve + pull model ───────────────────────────────
-  if (!ollamaRunning) {
-    splashStep('model', 'active', 'Starting Ollama server…\n');
+  // Step 3: start Ollama serve + pull model
+  if (ollamaInstalled && !ollamaRunning) {
+    splashStep('model', 'active', 'Starting Ollama server...\n');
     const exe = getOllamaExe();
     try {
       const proc = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
       proc.on('error', () => {});
       proc.unref();
-      await sleep(2000);
+      await sleep(2500);
+      const r = await fetch(`${ollamaUrl}/api/tags`).catch(() => null);
+      ollamaRunning = !!(r && r.ok);
     } catch (e) {
       splashStep('model', 'active', `Could not start Ollama: ${e.message}\n`);
     }
   }
 
-  if (!modelPulled) {
-    splashStep('model', 'active', `Pulling model ${preferredModel} (this may take a while for first pull)…\n`);
+  if (!ollamaInstalled) {
+    splashStep('model', 'error', 'Skipping model pull because Ollama is not installed yet.\n');
+  } else if (!modelPulled) {
+    splashStep('model', 'active', `Pulling model ${preferredModel} (this may take a while for first pull)...\n`);
     const pullResult = await new Promise((resolve) => {
       const exe = getOllamaExe();
       const proc = spawn(exe, ['pull', preferredModel], { shell: false, windowsHide: true });
       proc.stdout.on('data', d => splashStep('model', 'active', d.toString()));
       proc.stderr.on('data', d => splashStep('model', 'active', d.toString()));
-      proc.on('close', code => resolve({ ok: code === 0 }));
+      proc.on('close', code => resolve({ ok: code === 0, code }));
       proc.on('error', err => resolve({ ok: false, error: err.message }));
     });
     splashStep('model', pullResult.ok ? 'done' : 'error',
-      pullResult.ok ? `Model ${preferredModel} ready.\n` : `Model pull failed — you can pull it later in Settings.\n`);
+      pullResult.ok ? `Model ${preferredModel} ready.\n` : `Model pull failed (${pullResult.error || `code ${pullResult.code}`}). You can pull it later in Settings.\n`);
   } else {
-    splashStep('model', 'done', `Model ${preferredModel} already present — skipping.\n`);
+    splashStep('model', 'done', `Model ${preferredModel} already present - skipping.\n`);
   }
   await sleep(200);
-
   // ── Step 4: Whisper setup ────────────────────────────────────────────────
   if (!whisperReady) {
     splashStep('whisper', 'active', 'Installing Whisper speech-to-text engine…\n');
@@ -1679,8 +1753,8 @@ function createSplash() {
   if (isUpdateMode) return;
   try {
     splashWindow = new BrowserWindow({
-      width: 420, height: 460, frame: false, transparent: true, resizable: false,
-      center: true, alwaysOnTop: true, skipTaskbar: true, show: false,
+      width: 560, height: 640, frame: false, transparent: true, resizable: false,
+      center: true, alwaysOnTop: false, skipTaskbar: true, show: false,
       backgroundColor: '#00000000',
       webPreferences: {
         preload: path.join(__dirname, 'src/splash-preload.js'),
@@ -1690,6 +1764,7 @@ function createSplash() {
     });
     splashWindow.loadFile(path.join(__dirname, 'src/splash.html'));
     splashWindow.once('ready-to-show', () => { if (splashWindow) splashWindow.show(); });
+    setTimeout(() => { if (splashWindow) splashWindow.show(); }, 1200);
     splashWindow.on('closed', () => { splashWindow = null; });
   } catch (e) { splashWindow = null; }
 }
@@ -1874,18 +1949,14 @@ app.whenReady().then(() => {
 
   registerIpc();
   if (!isUpdateMode) {
-    // First-run: keep the splash open as the setup wizard; it will call createWindow() when done.
-    // Normal launch: createWindow() immediately (splash closes when main window is ready-to-show).
-    if (!isFirstRun()) {
-      createWindow();
-    }
-    // If first-run, the splash's splashBridge.runSetup() → 'splash-run-setup' IPC → runFirstRunSetup()
-    // → createWindow() chain handles it.
+    // First-run shows the dependency setup wizard first. Normal launch opens immediately.
+    firstRunPending = isFirstRun();
+    if (!firstRunPending) createWindow();
   }
   // Note: update mode process is headless replacer (scheduled above), no window.
 
   app.on('activate', () => {
-    if (!isUpdateMode && BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!isUpdateMode && !firstRunPending && BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 

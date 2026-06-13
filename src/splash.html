@@ -14,7 +14,7 @@
       justify-content: center; gap: 0;
       background: radial-gradient(120% 120% at 50% 0%, #14182b 0%, #0a0a0b 70%);
       border: 1px solid rgba(148,163,184,.15); border-radius: 20px;
-      padding: 32px 28px; position: relative; overflow: hidden;
+      padding: 34px 42px; position: relative; overflow: hidden;
     }
 
     /* === Normal splash (fast launch) === */
@@ -33,13 +33,13 @@
     #setup-splash {
       display: none; flex-direction: column; align-items: center; width: 100%; gap: 0;
     }
-    .setup-logo { width: 52px; height: 52px; border-radius: 14px; box-shadow: 0 8px 28px rgba(99,102,241,.35); margin-bottom: 10px; }
-    .setup-title { font-size: 20px; font-weight: 700; color: #e5e7eb; margin-bottom: 2px; }
-    .setup-tagline { font-size: 11.5px; color: #6b7280; margin-bottom: 18px; }
+    .setup-logo { width: 64px; height: 64px; border-radius: 16px; box-shadow: 0 8px 28px rgba(99,102,241,.35); margin-bottom: 12px; }
+    .setup-title { font-size: 26px; font-weight: 700; color: #e5e7eb; margin-bottom: 4px; }
+    .setup-tagline { font-size: 13px; color: #8b94a7; margin-bottom: 24px; text-align: center; }
 
     /* Progress bar */
     .progress-track {
-      width: 100%; height: 4px; background: rgba(148,163,184,.12); border-radius: 2px; margin-bottom: 16px; overflow: hidden;
+      width: 100%; height: 5px; background: rgba(148,163,184,.12); border-radius: 2px; margin-bottom: 18px; overflow: hidden;
     }
     .progress-fill {
       height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6);
@@ -47,10 +47,10 @@
     }
 
     /* Step list */
-    .steps { width: 100%; display: flex; flex-direction: column; gap: 7px; margin-bottom: 16px; }
+    .steps { width: 100%; display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
     .step {
       display: flex; align-items: center; gap: 10px;
-      padding: 8px 12px; border-radius: 9px;
+      padding: 12px 14px; border-radius: 10px;
       background: rgba(255,255,255,.03); border: 1px solid rgba(148,163,184,.08);
       transition: background .3s, border-color .3s;
     }
@@ -65,7 +65,7 @@
     .step-spin { width: 14px; height: 14px; border-radius: 50%;
       border: 2px solid rgba(99,102,241,.3); border-top-color: #6366f1;
       animation: s .75s linear infinite; }
-    .step-label { flex: 1; font-size: 12px; font-weight: 500; color: #cbd5e1; }
+    .step-label { flex: 1; font-size: 14px; font-weight: 600; color: #cbd5e1; }
     .step.done .step-label { color: #86efac; }
     .step.error .step-label { color: #fca5a5; }
     .step-quip { font-size: 10.5px; color: #6b7280; font-style: italic; }
@@ -74,7 +74,7 @@
     .log-area {
       width: 100%; font-size: 10px; color: #4b5563; font-family: 'Cascadia Code', 'Consolas', monospace;
       background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.05);
-      border-radius: 7px; padding: 7px 10px; height: 54px; overflow-y: auto;
+      border-radius: 8px; padding: 10px 12px; height: 78px; overflow-y: auto;
       line-height: 1.5; white-space: pre-wrap; word-break: break-all;
       margin-bottom: 12px;
     }
@@ -90,6 +90,14 @@
     }
     .skip-btn:hover { color: #9ca3af; }
     .skip-btn.visible { display: block; }
+    .setup-actions { display: flex; width: 100%; gap: 12px; margin-bottom: 12px; }
+    .setup-action {
+      flex: 1; border: 0; border-radius: 12px; padding: 13px 14px;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .setup-action.primary { background: #e5e7eb; color: #05070d; }
+    .setup-action.secondary { background: rgba(255,255,255,.06); color: #cbd5e1; border: 1px solid rgba(148,163,184,.15); }
+    .setup-action:disabled { opacity: .55; cursor: default; }
 
     /* Done checkmark burst */
     .done-burst {
@@ -116,7 +124,7 @@
     <div id="setup-splash">
       <img class="setup-logo" src="../assets/LOGO.png" alt="" onerror="this.style.display='none'">
       <div class="setup-title">Welcome to VibeForge</div>
-      <div class="setup-tagline">Setting up your local AI stack — one time only</div>
+      <div class="setup-tagline" id="setup-tagline">Hello. Let's set up the local AI tools this PC needs.</div>
 
       <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
 
@@ -125,6 +133,10 @@
       </div>
 
       <div class="log-area" id="setup-log"></div>
+      <div class="setup-actions" id="setup-actions">
+        <button class="setup-action secondary" id="skip-now-btn" onclick="doSkip()">Skip for now</button>
+        <button class="setup-action primary" id="start-setup-btn" onclick="startSetup()">Set up dependencies</button>
+      </div>
       <div class="done-burst" id="done-burst">
         <div class="check">✅</div>
         <p>You're all set!</p>
@@ -146,6 +158,7 @@
     ];
 
     let stepStates = {}; // id -> 'pending'|'active'|'done'|'error'
+    let setupStarted = false;
     STEPS.forEach(s => stepStates[s.id] = 'pending');
 
     function renderSteps() {
@@ -192,9 +205,20 @@
       if (window.splashBridge) window.splashBridge.skipSetup();
     }
 
-    // Show skip button after 30s in case something stalls
-    setTimeout(() => {
+    function startSetup() {
+      if (setupStarted || !window.splashBridge) return;
+      setupStarted = true;
+      document.getElementById('start-setup-btn').disabled = true;
+      document.getElementById('skip-now-btn').disabled = true;
+      document.getElementById('setup-actions').style.display = 'none';
       document.getElementById('skip-btn').classList.add('visible');
+      document.getElementById('setup-tagline').textContent = 'Downloading and checking the local AI stack. This can take a while.';
+      window.splashBridge.runSetup();
+    }
+
+    // Show the stall-skip button after 30s once setup has started.
+    setTimeout(() => {
+      if (setupStarted) document.getElementById('skip-btn').classList.add('visible');
     }, 30000);
 
     // ─── Bridge wiring ─────────────────────────────────────────────────────────
@@ -227,8 +251,7 @@
         document.getElementById('skip-btn').classList.remove('visible');
       });
 
-      // Kick off setup
-      window.splashBridge.runSetup();
+      document.getElementById('setup-log').textContent = 'This one-time setup can install Ollama, pull the default model, and download Whisper for local transcription.\nNothing starts until you click Set up dependencies.';
     });
   </script>
 </body>
