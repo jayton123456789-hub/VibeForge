@@ -1478,6 +1478,25 @@ function getLocalIP() {
   return '127.0.0.1';
 }
 
+let splashWindow = null;
+function createSplash() {
+  if (isUpdateMode) return;
+  try {
+    splashWindow = new BrowserWindow({
+      width: 380, height: 300, frame: false, transparent: true, resizable: false,
+      center: true, alwaysOnTop: true, skipTaskbar: true, show: false,
+      backgroundColor: '#00000000',
+      webPreferences: { contextIsolation: true, nodeIntegration: false }
+    });
+    splashWindow.loadFile(path.join(__dirname, 'src/splash.html'));
+    splashWindow.once('ready-to-show', () => { if (splashWindow) splashWindow.show(); });
+    splashWindow.on('closed', () => { splashWindow = null; });
+  } catch (e) { splashWindow = null; }
+}
+function closeSplash() {
+  if (splashWindow) { try { splashWindow.close(); } catch (e) {} splashWindow = null; }
+}
+
 function createWindow() {
   if (isUpdateMode) return;
   Menu.setApplicationMenu(null);
@@ -1520,15 +1539,19 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'src/index.html'));
 
   mainWindow.once('ready-to-show', () => {
+    closeSplash();
     mainWindow.show();
     mainWindow.focus();
-    // DevTools no longer auto-opened (user didn't like the "weird DEV window")
 
     // Auto check for update on launch - show big green banner if available
     setTimeout(() => {
       performAutoUpdateCheck(mainWindow);
     }, 2500);
   });
+
+  // Safety net: never leave the splash orphaned if the main window errors out.
+  mainWindow.webContents.on('did-fail-load', () => closeSplash());
+  setTimeout(closeSplash, 20000);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -1567,6 +1590,8 @@ async function performAutoUpdateCheck(win) {
 }
 
 app.whenReady().then(() => {
+  // Show the splash IMMEDIATELY so launch feels instant, before the (slower) DB init.
+  createSplash();
   initDb();
 
   // Developer startup log for data debugging (visible when launched from console/bat)

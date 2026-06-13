@@ -479,11 +479,14 @@ async function openSession(id) {
   const timeline = (await window.vibeforge.getTimelineBySession(id)) || [];
   const rawNotes = s.notes || '';
   const summaryMatch = rawNotes.match(/\[AI Summary\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
-  const transcriptMatch = rawNotes.match(/\[Live transcript\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
+  // Prefer the accurate full-Whisper transcript; fall back to the rough live captions.
+  const whisperMatch = rawNotes.match(/\[Whisper transcript\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
+  const liveMatch = rawNotes.match(/\[Live transcript\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
   const aiSummary = summaryMatch ? summaryMatch[1].trim() : '';
-  const transcriptText = transcriptMatch ? transcriptMatch[1].trim() : '';
+  const transcriptText = (whisperMatch ? whisperMatch[1] : (liveMatch ? liveMatch[1] : '')).trim();
   const cleanNotes = rawNotes
     .replace(/\n?\[AI Summary\]\s*[\s\S]*?(?=\n\n\[|$)/i, '')
+    .replace(/\n?\[Whisper transcript\]\s*[\s\S]*?(?=\n\n\[|$)/i, '')
     .replace(/\n?\[Live transcript\]\s*[\s\S]*?(?=\n\n\[|$)/i, '')
     .trim();
   const hasAiOutput = Boolean(aiSummary || tasks.length || decisions.length || ideas.length);
@@ -2687,19 +2690,24 @@ window.transcribeSession = async function(sessionId, options = {}) {
   if (!options.silent) showToast('Transcribing locally with Whisper... this can take a bit for long recordings.');
   try {
     const bytes = await window.vibeforge.readFileBuffer(s.audio_path);
-    if (!bytes) { if (!options.silent) showToast('Recording file not found on disk.'); return; }
+    if (!bytes) { if (!options.silent) showToast('Recording file not found on disk.'); return ''; }
     const wav = await audioBytesToWav16k(bytes);
-    const res = await window.vibeforge.transcribeWav({ wav, sessionId, appendToNotes: true });
+    // appendToNotes only when NOT part of auto-process (auto-process passes the text to the
+    // brain directly, so we don't also dump a [Whisper transcript] block into notes).
+    const res = await window.vibeforge.transcribeWav({ wav, sessionId, appendToNotes: !options.returnOnly });
     if (res && res.ok) {
       if (!options.silent) {
         showToast(res.transcript ? 'Transcript added to session notes' : 'Done - no speech detected in the recording');
         await openSession(sessionId);
       }
+      return res.transcript || '';
     } else {
       if (!options.silent) showToast('Transcription failed: ' + (res ? res.error : 'unknown'));
+      return '';
     }
   } catch (e) {
     if (!options.silent) showToast('Transcription failed: ' + e.message);
+    return '';
   }
 };
 
@@ -3081,12 +3089,13 @@ The places things go:
 - TASK — a concrete action someone needs to do later ("email the designer", "rebuild the native module"). Use add_task.
 - DECISION — a choice the group is weighing or settled. This includes debated topics where people disagreed. Capture the options and who argued what, and mark it "open" if it still needs to be settled or "decided" if they landed on an answer. Use add_decision. This is for the things they'll want to come back and vote/settle on.
 - IDEA — a spark, a "wouldn't it be cool if", a tangent. ESPECIALLY capture ideas that are unrelated to the main topic — those are the easiest to lose and the most worth keeping. Give each idea a short topic label so related ideas from different sessions can be grouped together over time. Use add_idea.
-- SUMMARY + NAME — call set_session_summary exactly once with a tight 3-6 word name and a 2-4 sentence summary.
+- SUMMARY + NAME — call set_session_summary exactly once with a tight 3-6 word name and a THOROUGH summary. Scale the summary to the session: a long working session deserves several substantial paragraphs covering the main threads discussed, what got decided, what's still open, the reasoning behind choices, and notable ideas — written so someone who missed the session understands what happened and why. A short clip can be a few sentences. Never one tiny line. Write in plain past-tense prose, not bullet fragments.
 
 Rules:
-- Always call set_session_summary once.
+- Every tool call MUST include a real title/text. Never call a tool with an empty or missing title — just skip it instead.
+- Always call set_session_summary once, and make the summary genuinely useful and complete.
 - Only create tasks/decisions/ideas that are actually supported by the content. Do not invent filler. A short session might produce just a summary and one idea — that's fine.
-- Prefer a few high-quality items over many vague ones. Cap yourself at ~6 tasks, ~5 decisions, ~6 ideas.
+- Prefer a few high-quality items over many vague ones. Cap yourself at ~8 tasks, ~6 decisions, ~8 ideas.
 - A disagreement or open question is a DECISION (status "open"), not a task.
 - When you are done filing everything, stop calling tools and reply with a one-line confirmation.`;
 
@@ -3097,7 +3106,7 @@ function brainTools() {
       description: 'Set the session name and summary. Call exactly once.',
       parameters: { type: 'object', properties: {
         short_name: { type: 'string', description: '3-6 word title for the session' },
-        summary: { type: 'string', description: '2-4 sentence summary of what happened and what matters' }
+        summary: { type: 'string', description: 'a thorough summary scaled to the session — several paragraphs for a long one, covering threads, decisions, open questions, reasoning, and ideas' }
       }, required: ['short_name', 'summary'] }
     }},
     { type: 'function', function: {
@@ -3132,44 +3141,62 @@ function brainTools() {
 }
 
 // Execute one tool call against the app. Returns a short result string for the model.
+// Coerce a tool arg to a clean non-empty string, or null. Guards against the model
+// passing nothing/undefined/"undefined" which previously created junk "undefined" items.
+function brainStr(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'null') return null;
+  return s;
+}
+
 async function runBrainTool(name, args, sessionId, tally) {
   args = args || {};
   const pid = currentProject.id;
   try {
     if (name === 'set_session_summary') {
-      if (args.short_name) {
-        await window.vibeforge.updateSessionTitle(sessionId, String(args.short_name).slice(0, 80));
-        tally.named = args.short_name;
+      const nm = brainStr(args.short_name);
+      const summ = brainStr(args.summary);
+      if (nm) {
+        await window.vibeforge.updateSessionTitle(sessionId, nm.slice(0, 80));
+        tally.named = nm;
       }
-      if (args.summary) {
+      if (summ) {
         const s = (await window.vibeforge.getSessions(pid)).find(x => x.id === sessionId);
-        await window.vibeforge.updateSessionNotes(sessionId, (s && s.notes ? s.notes : '') + '\n\n[AI Summary]\n' + args.summary);
+        await window.vibeforge.updateSessionNotes(sessionId, (s && s.notes ? s.notes : '') + '\n\n[AI Summary]\n' + summ);
         tally.summary = true;
       }
-      return 'summary and name saved';
+      return nm || summ ? 'summary and name saved' : 'skipped (empty summary)';
     }
     if (name === 'add_task') {
-      await window.vibeforge.addTask({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), priority: args.priority || 'medium' });
+      const title = brainStr(args.title);
+      if (!title) return 'skipped: task had no title';
+      await window.vibeforge.addTask({ projectId: pid, sessionId, title: title.slice(0, 200), priority: args.priority || 'medium' });
       tally.tasks++;
       return 'task added';
     }
     if (name === 'add_decision') {
-      const opts = Array.isArray(args.options) ? args.options : [];
+      const title = brainStr(args.title);
+      if (!title) return 'skipped: decision had no title';
+      const opts = Array.isArray(args.options) ? args.options.map(brainStr).filter(Boolean) : [];
       let notes = '';
       if (opts.length) notes += 'Options: ' + opts.join(' | ') + '\n';
-      if (args.positions) notes += args.positions + '\n';
-      if (args.resolution) notes += 'Resolution: ' + args.resolution + '\n';
+      if (brainStr(args.positions)) notes += brainStr(args.positions) + '\n';
+      if (brainStr(args.resolution)) notes += 'Resolution: ' + brainStr(args.resolution) + '\n';
       const status = args.status === 'decided' ? 'approved' : 'proposed';
-      await window.vibeforge.addDecision({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), notes: notes.trim(), status });
+      await window.vibeforge.addDecision({ projectId: pid, sessionId, title: title.slice(0, 200), notes: notes.trim(), status });
       tally.decisions++;
       return 'decision added';
     }
     if (name === 'add_idea') {
-      const tags = args.topic ? [String(args.topic).toLowerCase().slice(0, 40)] : [];
-      const created = await window.vibeforge.addIdea({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), description: args.description || '', tags });
+      const title = brainStr(args.title);
+      if (!title) return 'skipped: idea had no title';
+      const topic = brainStr(args.topic);
+      const tags = topic ? [topic.toLowerCase().slice(0, 40)] : [];
+      const created = await window.vibeforge.addIdea({ projectId: pid, sessionId, title: title.slice(0, 200), description: brainStr(args.description) || '', tags });
       if (created && created.id) await window.vibeforge.updateIdea({ id: created.id, status: 'Inbox' });
       tally.ideas++;
-      return 'idea added' + (args.topic ? ' under topic "' + args.topic + '"' : '');
+      return 'idea added' + (topic ? ' under topic "' + topic + '"' : '');
     }
   } catch (e) {
     return 'error: ' + e.message;
@@ -3189,7 +3216,23 @@ async function runSessionBrain(sessionId, opts = {}) {
   const s = sessions.find(x => x.id === sessionId);
   if (!s) throw new Error('Session not found');
 
-  const context = `Session title: ${s.title}\nMode: ${s.mode}\n\n--- NOTES & TRANSCRIPT ---\n${s.notes || '(no notes captured)'}\n--- END ---\n\nFile everything into the app now using your tools.`;
+  // Prefer the clean full-Whisper transcript (passed in by the caller) over the messy
+  // real-time captions. Fall back to notes/typed content if no transcript was produced.
+  let body = '';
+  if (opts.transcript && opts.transcript.trim()) {
+    body = 'TRANSCRIPT (accurate, from local Whisper):\n' + opts.transcript.trim();
+    // Include any manually typed notes / marks too, minus the auto transcript blocks.
+    const typed = (s.notes || '')
+      .replace(/\[Live transcript\][\s\S]*?(?=\n\n\[|$)/i, '')
+      .replace(/\[Whisper transcript\][\s\S]*?(?=\n\n\[|$)/i, '')
+      .replace(/\[AI Summary\][\s\S]*?(?=\n\n\[|$)/i, '')
+      .trim();
+    if (typed) body += '\n\nTYPED NOTES & MARKS:\n' + typed;
+  } else {
+    body = (s.notes || '(no notes captured)');
+  }
+
+  const context = `Session title: ${s.title}\nMode: ${s.mode}\nLength: ${s.ended_at ? Math.round((s.ended_at - s.started_at)/60000) + ' min' : 'unknown'}\n\n--- SESSION CONTENT ---\n${body}\n--- END ---\n\nFile everything into the app now using your tools, then write the thorough summary.`;
 
   const messages = [
     { role: 'system', content: BRAIN_SYSTEM_PROMPT },
@@ -3197,12 +3240,15 @@ async function runSessionBrain(sessionId, opts = {}) {
   ];
   const tools = brainTools();
   const tally = { tasks: 0, decisions: 0, ideas: 0, summary: false, named: null };
+  // Give the model real context room so long (multi-hour) sessions aren't truncated to
+  // Ollama's tiny 2048 default. Sized up but bounded so RAM stays sane.
+  const numCtx = Math.min(32768, Math.max(8192, Math.ceil(body.length / 3) + 2048));
 
   // Agentic loop, bounded for a local model.
   for (let round = 0; round < 5; round++) {
     const res = await fetch(`${ollamaUrl}/api/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, tools, stream: false })
+      body: JSON.stringify({ model, messages, tools, stream: false, options: { num_ctx: numCtx } })
     });
     if (!res.ok) {
       // Model likely doesn't support tools — signal caller to fall back.
@@ -3424,12 +3470,15 @@ function updateProcessingStep(step, state, subtitle, progress) {
 }
 
 async function autoProcessSessionAfterStop(sessionId) {
-  updateProcessingStep('transcript', 'active', 'Checking local Whisper for transcript...', '35%');
+  let cleanTranscript = '';
+  updateProcessingStep('transcript', 'active', 'Transcribing the full recording with Whisper (accurate pass)...', '35%');
   try {
     const w = await window.vibeforge.whisperCheck();
     if (w && w.configured) {
-      await window.transcribeSession(sessionId, { silent: true });
-      updateProcessingStep('transcript', 'done', 'Transcript saved. Checking Local AI...', '55%');
+      // Full, accurate Whisper pass on the whole recording. This — not the rough live
+      // captions — is saved as [Whisper transcript] AND fed to the AI.
+      cleanTranscript = await window.transcribeSession(sessionId, { silent: true });
+      updateProcessingStep('transcript', 'done', 'Accurate transcript ready. Reading it now...', '55%');
     } else {
       updateProcessingStep('transcript', 'skip', 'Whisper is not set up yet. Recording is saved; transcript can run later.', '50%');
     }
@@ -3451,6 +3500,7 @@ async function autoProcessSessionAfterStop(sessionId) {
   try {
     // The brain: one tool-calling pass that routes content into tasks/decisions/ideas itself.
     const r = await runSessionBrain(sessionId, {
+      transcript: cleanTranscript,
       onStep: (m) => updateProcessingStep('items', 'active', m, '88%')
     });
     const t = r.tally;

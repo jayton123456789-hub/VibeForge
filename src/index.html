@@ -36,7 +36,8 @@
 <body class="text-zinc-100 overflow-hidden">
   <div class="flex flex-col h-screen">
     <!-- Command bar -->
-    <div class="drag-region h-20 px-6 flex items-center gap-6 select-none">
+    <!-- pr reserves the top-right zone for the native window controls (min/max/close overlay) -->
+    <div class="drag-region h-20 pl-6 pr-[150px] flex items-center gap-6 select-none">
       <div class="flex items-center gap-x-4 w-64">
         <div class="flex items-center gap-x-2">
           <img src="../assets/LOGO.png" width="34" height="34" class="rounded-xl" alt="VibeForge" onerror="this.style.display='none'">

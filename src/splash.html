@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif; -webkit-user-select: none; }
+    .card {
+      height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 18px; background: radial-gradient(120% 120% at 50% 0%, #14182b 0%, #0a0a0b 70%);
+      border: 1px solid rgba(148,163,184,.15); border-radius: 20px;
+    }
+    .logo { width: 76px; height: 76px; border-radius: 18px; box-shadow: 0 12px 40px rgba(99,102,241,.35); }
+    .name { color: #e5e7eb; font-size: 26px; font-weight: 700; letter-spacing: .5px; }
+    .sub { color: #6b7280; font-size: 12px; margin-top: -8px; }
+    .spin { width: 26px; height: 26px; border-radius: 50%;
+      border: 3px solid rgba(148,163,184,.25); border-top-color: #6366f1; animation: s .7s linear infinite; }
+    @keyframes s { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img class="logo" src="../assets/LOGO.png" alt="" onerror="this.style.display='none'">
+    <div class="name">VibeForge</div>
+    <div class="spin"></div>
+    <div class="sub">Starting up…</div>
+  </div>
+</body>
+</html>
