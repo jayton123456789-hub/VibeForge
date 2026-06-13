@@ -242,7 +242,7 @@ function initDb() {
     ['profile_name', 'You'],
     ['ollama_url', 'http://127.0.0.1:11434'],
     ['ollama_model', 'llama3.2'],
-    // Pre-set to Jayton's repo. The Settings UI now always shows a clear CHECK FOR UPDATE + SIGN IN area + publishing tools.
+    // Release feed used by the public Check for Update button.
     ['github_owner', 'jayton123456789-hub'],
     ['github_repo', 'VibeForge'],
     ['auto_check_updates', 'true']

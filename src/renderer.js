@@ -30,6 +30,13 @@ let currentLinkMode = 'control';
 // Global timer ref so repeated quickStartRecording never stacks intervals
 let _globalTimerInterval = null;
 let _activeLiveSession = null;
+let _duoPeerSessionNotes = {};
+let _duoPeerAiResults = {};
+
+function getProfileNameFallback() {
+  const n = document.getElementById('project-name')?.textContent || 'Linked collaborator';
+  return n === 'No project' ? 'Linked collaborator' : n;
+}
 
 // Init
 async function init() {
@@ -110,37 +117,81 @@ async function ensureDefaultProject() {
 
 function maybeShowFirstRunTour(force = false) {
   if (!force && localStorage.getItem('vibeforge-tour-seen') === 'true') return;
-  const modal = document.createElement('div');
-  modal.className = 'fixed inset-0 bg-black/75 z-[600] flex items-center justify-center p-6';
-  modal.innerHTML = `
-    <div class="w-full max-w-4xl rounded-[30px] border border-zinc-600 bg-[#0b0f1d] shadow-2xl shadow-black/60 overflow-hidden">
-      <div class="p-7 border-b border-zinc-800">
-        <div class="text-xs uppercase tracking-[2px] text-cyan-300 mb-2">First time tour</div>
-        <div class="text-3xl font-semibold">Record first. Organize later.</div>
-        <div class="text-zinc-400 mt-2">VibeForge is built so you do not have to type while ideas are happening. These are the buttons that matter.</div>
-      </div>
-      <div class="grid md:grid-cols-2 gap-3 p-6">
-        <div class="rounded-2xl border border-red-500/30 bg-red-500/10 p-4"><div class="font-semibold text-red-200 mb-1"><i class="fa-solid fa-microphone mr-2"></i>Quick Record</div><div class="text-sm text-zinc-400">Starts recording immediately. Name, summarize, and sort it later.</div></div>
-        <div class="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4"><div class="font-semibold text-amber-200 mb-1"><i class="fa-solid fa-bolt mr-2"></i>Mark Moment</div><div class="text-sm text-zinc-400">Drops a timestamped task, decision, or idea without typing.</div></div>
-        <div class="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 p-4"><div class="font-semibold text-cyan-200 mb-1"><i class="fa-solid fa-desktop mr-2"></i>Screen / Window</div><div class="text-sm text-zinc-400">Adds video capture only when you need it.</div></div>
-        <div class="rounded-2xl border border-violet-500/30 bg-violet-500/10 p-4"><div class="font-semibold text-violet-200 mb-1"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</div><div class="text-sm text-zinc-400">After the call, use local AI to summarize, extract tasks, and name sessions.</div></div>
-      </div>
-      <div class="p-6 pt-0 flex gap-3">
-        <button class="tour-start flex-1 py-3 rounded-2xl bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold">Start Recording</button>
-        <button class="tour-close flex-1 py-3 rounded-2xl bg-white text-black font-semibold">Got it</button>
+  const steps = [
+    { target: '.fa-microphone', title: 'Quick Record', body: 'This is the main flow: tap the mic, start talking, name it later. VibeForge saves the session and runs cleanup after you stop.' },
+    { target: '#global-search', title: 'Global Search', body: 'Search across sessions, notes, decisions, tasks, and ideas. Press Enter to jump into Project Memory.' },
+    { target: '#nav-sessions', title: 'Sessions', body: 'Your recordings live here. Open old sessions, resume them, review transcripts, highlights, and AI summaries.' },
+    { target: '#nav-decisions', title: 'Decision Vault', body: 'Choices and open questions get filed here so they do not disappear inside a long conversation.' },
+    { target: '#nav-tasks', title: 'Tasks', body: 'Action items extracted from sessions or marked live during a recording.' },
+    { target: '#nav-ideas', title: 'Idea Vault', body: 'Loose sparks and side ideas go here. Capture them quickly, then save, archive, rename, or convert later.' },
+    { target: '#nav-memory', title: 'Project Memory', body: 'Ask your local AI about your real stored project data. It uses your sessions and vaults as context.' },
+    { target: '#nav-share', title: 'Link', body: 'Connect with Nick or Dylan. Once linked, Control, Remote Vault, and Link Vault unlock under this tab.' },
+    { target: '#service-status', title: 'Local AI Status', body: 'These lights show Ollama and Whisper readiness. Click them to jump to AI setup if something is offline.' },
+    { target: '#nav-settings', title: 'Settings', body: 'Setup Ollama, Whisper, folders, updates, and reset tools here. Core work stays local on this PC.' }
+  ];
+  let index = 0;
+  const overlay = document.createElement('div');
+  overlay.id = 'spotlight-tour';
+  overlay.className = 'fixed inset-0 z-[700] pointer-events-none';
+  overlay.innerHTML = `
+    <div class="absolute inset-0 bg-black/70"></div>
+    <div id="tour-ring" class="absolute rounded-[22px] border-2 border-cyan-300 shadow-[0_0_0_9999px_rgba(0,0,0,.68),0_0_36px_rgba(34,211,238,.75)] transition-all duration-200"></div>
+    <div id="tour-card" class="absolute w-[360px] max-w-[calc(100vw-32px)] rounded-[26px] border border-cyan-500/30 bg-[#0b0f1d] p-5 shadow-2xl shadow-black/70 pointer-events-auto">
+      <div class="text-[10px] uppercase tracking-[2px] text-cyan-300 mb-2">Guided tour <span id="tour-count"></span></div>
+      <div id="tour-title" class="text-xl font-semibold"></div>
+      <div id="tour-body" class="mt-2 text-sm leading-6 text-zinc-400"></div>
+      <div class="mt-5 flex gap-2">
+        <button id="tour-skip" class="flex-1 rounded-2xl border border-zinc-700 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Skip</button>
+        <button id="tour-back" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Back</button>
+        <button id="tour-next" class="flex-1 rounded-2xl bg-white py-2 text-sm font-semibold text-black">Next</button>
       </div>
     </div>
   `;
-  document.body.appendChild(modal);
-  const close = () => {
+  document.body.appendChild(overlay);
+
+  const close = async (startRecording = false) => {
     localStorage.setItem('vibeforge-tour-seen', 'true');
-    modal.remove();
+    overlay.remove();
+    if (startRecording) await quickStartRecording();
   };
-  modal.querySelector('.tour-close').onclick = close;
-  modal.querySelector('.tour-start').onclick = async () => {
-    close();
-    await quickStartRecording();
+  const render = () => {
+    const step = steps[index];
+    let el = document.querySelector(step.target);
+    if (!el) el = document.getElementById('main-content') || document.body;
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    const ring = document.getElementById('tour-ring');
+    ring.style.left = `${Math.max(8, rect.left - pad)}px`;
+    ring.style.top = `${Math.max(8, rect.top - pad)}px`;
+    ring.style.width = `${Math.max(44, rect.width + pad * 2)}px`;
+    ring.style.height = `${Math.max(44, rect.height + pad * 2)}px`;
+
+    const card = document.getElementById('tour-card');
+    const rightRoom = window.innerWidth - rect.right;
+    let left = rightRoom > 390 ? rect.right + 18 : rect.left - 378;
+    if (left < 16) left = 16;
+    if (left + 360 > window.innerWidth - 16) left = window.innerWidth - 376;
+    let top = rect.top;
+    if (top + 230 > window.innerHeight - 16) top = window.innerHeight - 246;
+    if (top < 16) top = 16;
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
+    document.getElementById('tour-count').textContent = `${index + 1}/${steps.length}`;
+    document.getElementById('tour-title').textContent = step.title;
+    document.getElementById('tour-body').textContent = step.body;
+    document.getElementById('tour-back').disabled = index === 0;
+    document.getElementById('tour-back').style.opacity = index === 0 ? '.45' : '1';
+    document.getElementById('tour-next').textContent = index === steps.length - 1 ? 'Start Recording' : 'Next';
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) {}
   };
+  overlay.querySelector('#tour-skip').onclick = () => close(false);
+  overlay.querySelector('#tour-back').onclick = () => { if (index > 0) { index--; render(); } };
+  overlay.querySelector('#tour-next').onclick = () => {
+    if (index >= steps.length - 1) close(true);
+    else { index++; render(); }
+  };
+  window.addEventListener('resize', render, { once: true });
+  render();
 }
 
 window.showFirstRunTour = function() {
@@ -1207,10 +1258,21 @@ async function renderLiveRoom(session) {
 
   const modeLabel = session.mode === 'manual' ? 'Manual Session' : 'Room Session';
   const isRoom = session.mode !== 'manual';
+  const isDuo = session.mode === 'duo';
+  const duoConnected = isDuo && peerStatus && peerStatus.status === 'connected';
+  const duoBanner = isDuo ? `
+        <div class="mb-5 rounded-[24px] border ${duoConnected ? 'border-emerald-500/35 bg-emerald-500/10' : 'border-amber-500/35 bg-amber-500/10'} p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div class="text-xs uppercase tracking-[.18em] ${duoConnected ? 'text-emerald-300' : 'text-amber-300'}"><i class="fa-solid fa-link mr-2"></i>Duo Link Session</div>
+            <div class="mt-1 text-sm text-zinc-300">${duoConnected ? 'Synced with your linked PC. Stopping here asks their app to stop/save too.' : 'Not linked yet. Open Link and connect before relying on synced stop/invites.'}</div>
+          </div>
+          <button onclick="switchView('share')" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-100 hover:bg-zinc-800">${duoConnected ? 'Open Link Control' : 'Connect in Link'}</button>
+        </div>` : '';
 
   content.innerHTML = `
     <div class="min-h-full grid 2xl:grid-cols-[1fr_300px] gap-4">
-      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-6 overflow-hidden">
+      <section class="rounded-[28px] border ${isDuo ? 'border-emerald-500/30' : 'border-zinc-700/50'} bg-[#0b0f1d]/90 p-6 overflow-hidden">
+        ${duoBanner}
         <div class="grid 2xl:grid-cols-[1fr_360px] gap-5">
           <div>
             <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2"><i class="fa-solid fa-users mr-2"></i>${modeLabel}</div>
@@ -1506,7 +1568,8 @@ async function renderLiveRoom(session) {
     }
   }
 
-  window.stopLiveRoom = async function(id) {
+  window.stopLiveRoom = async function(id, opts = {}) {
+    const remoteTriggered = !!opts.remoteTriggered;
     clearInterval(timerInterval);
     _globalTimerInterval = null;
     if (_activeLiveSession && _activeLiveSession.id === id) {
@@ -1557,7 +1620,30 @@ async function renderLiveRoom(session) {
     // save notes + live transcript (if any)
     let finalNotes = (document.getElementById('live-notes') || {}).value || notes;
     if (liveTranscript && liveTranscript.trim()) {
-      finalNotes = finalNotes + (finalNotes ? '\n\n' : '') + '[Live transcript]\n' + liveTranscript.trim();
+      finalNotes = finalNotes + (finalNotes ? '\n\n' : '') + `[${getProfileNameFallback()}'s live transcript]\n` + liveTranscript.trim();
+    }
+    const peerBundle = _duoPeerSessionNotes[id];
+    if (peerBundle && (peerBundle.notes || peerBundle.transcript)) {
+      const label = peerBundle.peerName || 'Linked collaborator';
+      const body = [peerBundle.transcript, peerBundle.notes].filter(Boolean).join('\n\n').trim();
+      if (body && !finalNotes.includes(`[${label}'s linked transcript]`)) {
+        finalNotes = finalNotes + (finalNotes ? '\n\n' : '') + `[${label}'s linked transcript]\n` + body;
+      }
+    }
+
+    if (!remoteTriggered && session.mode === 'duo' && peerStatus && peerStatus.status === 'connected') {
+      await sendPeerJson({
+        type: 'duo-command',
+        command: 'session-ended',
+        session: {
+          title: session.title,
+          started_at: session.started_at,
+          ended_at: Date.now()
+        },
+        peerName: getProfileNameFallback(),
+        transcript: liveTranscript || '',
+        notes: finalNotes || ''
+      });
     }
 
     await window.vibeforge.updateSessionNotes(id, finalNotes);
@@ -1588,8 +1674,17 @@ async function renderLiveRoom(session) {
       }
     }
 
-    showSessionProcessingScreen(id, 'Session saved', 'Starting local AI cleanup...');
-    await autoProcessSessionAfterStop(id);
+    showSessionProcessingScreen(id, remoteTriggered ? 'Linked session ended' : 'Session saved', remoteTriggered ? 'Your collaborator stopped. Saving your side and starting local AI cleanup...' : 'Starting local AI cleanup...');
+    const aiResult = await autoProcessSessionAfterStop(id);
+    if (session.mode === 'duo' && peerStatus && peerStatus.status === 'connected' && aiResult) {
+      await sendPeerJson({
+        type: 'duo-command',
+        command: 'ai-results',
+        peerName: getProfileNameFallback(),
+        sessionTitle: session.title,
+        result: aiResult
+      });
+    }
     await openSession(id);
   };
 
@@ -1843,7 +1938,10 @@ async function renderDuoSetup(session) {
   const status = await getDuoStatus();
   if (status && status.status === 'connected') {
     await sendLinkedSessionInvite(session);
-    showToast('Duo invite sent. Start when both sides are ready.');
+    window._pendingDuoSession = null;
+    showToast('Duo invite sent. Starting your side.');
+    await renderLiveRoom(session);
+    return;
   } else {
     showToast('Use Link to host/join. Once connected, start this Duo session from there.');
   }
@@ -1943,7 +2041,7 @@ async function renderShareView(content, actionsEl) {
         <div><div class="text-xs uppercase tracking-[.18em] text-emerald-300">Link Control</div><div class="mt-1 text-2xl font-semibold text-white">Both apps are linked</div><div class="mt-1 text-sm text-zinc-400">Control is for shared navigation and Duo session invites. Remote data lives in Remote Vault. Files live in Link Vault.</div></div>
         <button onclick="duoDisconnectFromShare()" class="rounded-2xl border border-red-500/40 px-4 py-2 text-sm font-semibold text-red-200 hover:bg-red-500/10">Disconnect</button>
       </div>
-      ${window._pendingDuoSession ? `<div class="mt-5 rounded-3xl border border-emerald-400/30 bg-black/30 p-5"><div class="font-semibold text-emerald-100">Duo session ready</div><div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are linked.</div><button onclick="startPendingLinkedSession()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button></div>` : ''}
+      ${window._pendingDuoSession ? `<div class="mt-5 rounded-3xl border border-emerald-400/40 bg-emerald-500/10 p-5 shadow-lg shadow-emerald-950/30"><div class="text-xs uppercase tracking-[.16em] text-emerald-300">Ready to invite</div><div class="mt-1 text-xl font-semibold text-emerald-100">Start this Duo session on both PCs</div><div class="mt-1 text-sm text-zinc-300">This sends Nick/Dylan a full-screen Join Session popup for "${esc(window._pendingDuoSession.title)}", then starts recording on your side.</div><button onclick="startPendingLinkedSession()" class="mt-4 w-full rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500"><i class="fa-solid fa-paper-plane mr-2"></i>Send Join Popup + Start My Side</button></div>` : ''}
       <div class="mt-5 grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
         <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div><div class="font-semibold text-white">Mirror a tab</div><div class="text-xs text-zinc-500">Click a tab and the other person jumps there too.</div></div><span class="rounded-full border border-cyan-500/30 px-3 py-1 text-[11px] text-cyan-300">Shared control</span></div><div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">${mirrorButtons}</div></div>
         <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5"><div class="font-semibold text-white">Quick link checks</div><div class="mt-1 text-xs text-zinc-500">Small proof that both apps can talk.</div><div class="mt-4 grid gap-2"><button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-note-sticky mr-2 text-purple-300"></i>Send latest session notes</button><button onclick="sendLinkPing()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-satellite-dish mr-2 text-emerald-300"></i>Send test ping</button></div></div>
@@ -2243,6 +2341,44 @@ async function handlePeerTextPayload(raw) {
         await showLinkedSessionInvite(data.session);
         return true;
       }
+      if (data.command === 'session-ended') {
+        const activeId = _activeLiveSession && _activeLiveSession.id;
+        if (activeId) {
+          _duoPeerSessionNotes[activeId] = {
+            peerName: data.peerName || 'Linked collaborator',
+            transcript: data.transcript || '',
+            notes: data.notes || '',
+            at: Date.now()
+          };
+          showToast(`${data.peerName || 'Linked collaborator'} stopped - saving your side too...`);
+          await window.stopLiveRoom(activeId, { remoteTriggered: true });
+        } else {
+          receivedItems.push({
+            type: 'session-ended',
+            title: `${data.peerName || 'Linked collaborator'} ended a session`,
+            content: data.transcript || data.notes || ''
+          });
+          showToast(`${data.peerName || 'Linked collaborator'} ended their session`);
+        }
+        return true;
+      }
+      if (data.command === 'ai-results') {
+        const result = data.result || {};
+        const peerName = data.peerName || 'Linked collaborator';
+        _duoPeerAiResults[data.sessionTitle || 'linked-session'] = { peerName, result, at: Date.now() };
+        receivedItems.push({
+          type: 'ai-results',
+          title: `${peerName} AI cleanup`,
+          content: result.skipped
+            ? `Skipped: ${result.skipped}`
+            : `Named: ${result.named || 'no rename'}, tasks: ${result.tasks || 0}, decisions: ${result.decisions || 0}, ideas: ${result.ideas || 0}`
+        });
+        if (currentView === 'share') {
+          renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
+        }
+        showToast(`Received ${peerName}'s AI cleanup result`);
+        return true;
+      }
       if (data.command === 'request-snapshot') {
         const snapshot = await buildLocalVaultSnapshot();
         await sendPeerJson(snapshot);
@@ -2292,7 +2428,8 @@ async function showLinkedSessionInvite(remoteSession) {
     const localSession = await window.vibeforge.createSession({
       projectId: currentProject.id,
       title,
-      mode: 'duo'
+      mode: 'duo',
+      startedAt: remoteSession.started_at || Date.now()
     });
     showToast('Joined linked Duo session');
     await renderLiveRoom(localSession);
@@ -2806,53 +2943,17 @@ async function renderSettingsView(content) {
   }
 
   else if (currentSettingsTab === 'updates') {
-    // This is the one the user cares about most: big CHECK FOR UPDATE + clear SIGN IN
     paneHtml = `
       <div class="space-y-4">
         <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
           <div class="text-lg font-semibold mb-1">Check for Updates</div>
-          <div class="text-xs text-zinc-400 mb-3">Looks at your GitHub repo for new versions.</div>
-
-          <div class="grid grid-cols-2 gap-2 mb-3">
-            <div>
-              <div class="text-xs text-zinc-400 mb-1">GitHub Owner</div>
-              <input id="set-gh-owner" value="${settings.github_owner || 'jayton123456789-hub'}" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base">
-            </div>
-            <div>
-              <div class="text-xs text-zinc-400 mb-1">Repo Name</div>
-              <input id="set-gh-repo" value="${settings.github_repo || 'VibeForge'}" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base">
-            </div>
+          <div class="text-xs text-zinc-400 mb-3">Checks the official VibeForge release feed and tells you if a newer portable build is available.</div>
+          <div class="mb-3 rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4 text-sm text-zinc-300">
+            Current version: <span class="font-mono text-cyan-300">${settings.app_version || '0.4.5'}</span>
           </div>
 
           <button onclick="checkForAppUpdates()" class="w-full py-4 bg-white text-black rounded-2xl font-semibold text-lg mb-2">CHECK FOR UPDATE</button>
           <div id="update-status" class="text-center text-sm"></div>
-        </div>
-
-        <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
-          <div class="text-lg font-semibold mb-1">Sign In to GitHub</div>
-          <div class="text-xs text-zinc-400 mb-3">GitHub login (via gh CLI) is persisted on your system - tokens survive app restarts. The app never signs you out; it just queries the current gh status. Once logged in as owner, future builds can publish without re-auth.</div>
-
-          <div class="flex flex-col gap-2">
-            <button onclick="doGhSignin(this)" class="w-full py-3 bg-emerald-600 rounded-2xl font-semibold">SIGN IN TO GITHUB</button>
-            <div class="flex gap-2">
-              <button onclick="checkGhCliStatus(this)" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">Check GitHub CLI</button>
-              <button onclick="checkAndEnableDevMode()" class="flex-1 py-2.5 bg-emerald-700 rounded-2xl text-sm font-medium">Check / Enable DEV (owner) status</button>
-            </div>
-          </div>
-          <div id="gh-status" class="mt-2 text-xs text-center"></div>
-          <div id="github-signin-log" class="mt-2 h-16 overflow-auto bg-black/40 text-[10px] p-2 rounded font-mono"></div>
-        </div>
-
-        <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
-          <div class="text-lg font-semibold mb-1">Build &amp; Publish (your repo)</div>
-          <div class="text-xs text-zinc-400 mb-3">Build the portable version and upload a real release to https://github.com/jayton123456789-hub/VibeForge.git</div>
-
-          <div class="flex gap-2 mb-2">
-            <button onclick="buildPortableRelease(this)" class="flex-1 py-3 bg-white text-black rounded-2xl font-semibold">Build Portable</button>
-            <button onclick="publishToGitHub(this)" class="flex-1 py-3 bg-emerald-600 rounded-2xl font-semibold">Publish Release</button>
-          </div>
-          <button onclick="window.vibeforge.revealDist()" class="w-full py-2.5 bg-zinc-800 rounded-2xl text-sm mb-2">Open dist folder</button>
-          <div id="build-log" class="h-20 overflow-auto bg-black/40 text-[10px] p-2 rounded font-mono"></div>
         </div>
       </div>
     `;
@@ -2922,15 +3023,6 @@ async function renderSettingsView(content) {
     }, 60);
   }
 
-  // Auto-detect GitHub / DEV status when viewing the Updates tab.
-  // gh CLI auth (your login) is persisted by the gh tool itself across app launches and builds.
-  // The app never signs you out - it just checks the current gh status.
-  // Once signed in as jayton123456789-hub, future builds can publish without re-auth.
-  if (currentSettingsTab === 'updates') {
-    setTimeout(() => {
-      checkAndEnableDevMode();
-    }, 100);
-  }
 }
 
 // Helper so the tab buttons can switch and re-render just the pane
@@ -3268,8 +3360,9 @@ async function checkWhisper() {
 }
 
 async function checkForAppUpdates() {
-  const owner = document.getElementById('set-gh-owner').value.trim();
-  const repo = document.getElementById('set-gh-repo').value.trim();
+  const settings = await window.vibeforge.getSettings();
+  const owner = settings.github_owner || 'jayton123456789-hub';
+  const repo = settings.github_repo || 'VibeForge';
   const st = document.getElementById('update-status');
   if (st) st.textContent = 'checking...';
   const r = await window.vibeforge.checkAppUpdate({ owner, repo });
@@ -3392,17 +3485,11 @@ window.saveAllSettings = async function() {
   const ollama = document.getElementById('set-ollama') ? document.getElementById('set-ollama').value.trim() : '';
   const model = document.getElementById('set-ollama-model') ? document.getElementById('set-ollama-model').value : '';
   const whisper = document.getElementById('set-whisper') ? document.getElementById('set-whisper').value.trim() : '';
-  const ghOwner = document.getElementById('set-gh-owner') ? document.getElementById('set-gh-owner').value.trim() : '';
-  const ghRepo = document.getElementById('set-gh-repo') ? document.getElementById('set-gh-repo').value.trim() : '';
-  const auto = document.getElementById('set-auto-update') ? (document.getElementById('set-auto-update').checked ? 'true' : 'false') : 'true';
 
   if (name) await window.vibeforge.saveSetting('profile_name', name);
   if (ollama) await window.vibeforge.saveSetting('ollama_url', ollama);
   if (model) await window.vibeforge.saveSetting('ollama_model', model);
   if (whisper) await window.vibeforge.saveSetting('whisper_path', whisper);
-  if (ghOwner) await window.vibeforge.saveSetting('github_owner', ghOwner);
-  if (ghRepo) await window.vibeforge.saveSetting('github_repo', ghRepo);
-  await window.vibeforge.saveSetting('auto_check_updates', auto);
   showToast('Settings saved');
 };
 
@@ -3823,6 +3910,7 @@ function updateProcessingStep(step, state, subtitle, progress) {
 
 async function autoProcessSessionAfterStop(sessionId) {
   let cleanTranscript = '';
+  const result = { ok: false, transcript: false, summary: false, tasks: 0, decisions: 0, ideas: 0, named: null, skipped: null };
   updateProcessingStep('transcript', 'active', 'Transcribing the full recording with Whisper (accurate pass)...', '35%');
   try {
     const w = await window.vibeforge.whisperCheck();
@@ -3830,6 +3918,7 @@ async function autoProcessSessionAfterStop(sessionId) {
       // Full, accurate Whisper pass on the whole recording. This — not the rough live
       // captions — is saved as [Whisper transcript] AND fed to the AI.
       cleanTranscript = await window.transcribeSession(sessionId, { silent: true });
+      result.transcript = true;
       updateProcessingStep('transcript', 'done', 'Accurate transcript ready. Reading it now...', '55%');
     } else {
       updateProcessingStep('transcript', 'skip', 'Whisper is not set up yet. Recording is saved; transcript can run later.', '50%');
@@ -3847,7 +3936,8 @@ async function autoProcessSessionAfterStop(sessionId) {
     updateProcessingStep('summary', 'skip', why, '85%');
     updateProcessingStep('items', 'skip', 'Tasks, decisions & ideas need a local model — skipped for now.', '100%');
     await new Promise(r => setTimeout(r, 1200));
-    return;
+    result.skipped = why;
+    return result;
   }
   try {
     // The brain: one tool-calling pass that routes content into tasks/decisions/ideas itself.
@@ -3856,6 +3946,12 @@ async function autoProcessSessionAfterStop(sessionId) {
       onStep: (m) => updateProcessingStep('items', 'active', m, '88%')
     });
     const t = r.tally;
+    result.ok = true;
+    result.summary = !!t.summary;
+    result.tasks = t.tasks || 0;
+    result.decisions = t.decisions || 0;
+    result.ideas = t.ideas || 0;
+    result.named = t.named || null;
     updateProcessingStep('summary', 'done', t.named ? `Named "${t.named}" and summarized.` : 'Summary saved.', '80%');
     updateProcessingStep('items', 'done', `Filed ${t.tasks} task(s), ${t.decisions} decision(s), ${t.ideas} idea(s).`, '100%');
     await new Promise(r => setTimeout(r, 700));
@@ -3867,18 +3963,23 @@ async function autoProcessSessionAfterStop(sessionId) {
         await generateFromSession(sessionId, 'summary', null);
         await generateFromSession(sessionId, 'tasks', null);
         await generateFromSession(sessionId, 'decisions', null);
+        result.ok = true;
+        result.summary = true;
         updateProcessingStep('summary', 'done', 'Summary saved.', '90%');
         updateProcessingStep('items', 'done', 'Tasks and decisions extracted.', '100%');
         await new Promise(r => setTimeout(r, 600));
       } catch (e2) {
         updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e2.message || e2), '100%');
+        result.skipped = e2.message || String(e2);
         await new Promise(r => setTimeout(r, 900));
       }
     } else {
       updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e.message || e), '100%');
+      result.skipped = e.message || String(e);
       await new Promise(r => setTimeout(r, 900));
     }
   }
+  return result;
 }
 
 // Processing bubble shown in bottom-right after Stop & Save

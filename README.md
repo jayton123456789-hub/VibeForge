@@ -76,6 +76,13 @@ All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibli
 
 No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer connection.
 
+## Recent Fixes (v0.4.5)
+
+- Recovered the useful old-chat work safely on top of the stable v0.4.4 renderer: real spotlight tour, Duo stop sync, linked transcript merge, Duo AI cleanup result sharing, clearer Duo recording banner, and public-facing Settings cleanup.
+- Duo / Link sessions now behave like a remote internet workflow: if both PCs are linked and one side starts a Duo session, the other side receives a Join Session popup; accepting creates a local session with the host start time. If one side stops, the other side is asked to stop/save too, then both sides can run local AI cleanup and exchange compact cleanup results.
+- Link's "Open Tester Window" remains as a development-only two-window simulator for local testing. It should be hidden or removed before `v1.0.0`; real Nick/Dylan usage is the room-code Link flow across separate PCs/networks.
+- Settings > Updates is now user-facing only: current version + Check for Update. GitHub sign-in/dev build/publish UI is no longer shown inside the normal app.
+
 ## Recent Fixes (v0.4.4)
 
 - Link workspace: Share is now Link. After connecting, Link unlocks real sidebar child tabs: Control, Remote Vault, and Link Vault. It also supports mirrored tabs, linked-session invites, the active-recording island while browsing other tabs, remote snapshots, ping, latest-notes send, and file transfer.
@@ -91,7 +98,7 @@ No accounts are required. Link uses PeerJS for signaling and WebRTC for the peer
 
 - Everyone gets a big CHECK FOR UPDATE in Settings.
 - Owner uses the same tab for real publishing.
-- Current recommended release: v0.4.4 or newer.
+- Current recommended release: v0.4.5 or newer.
 
 ## Philosophy
 
