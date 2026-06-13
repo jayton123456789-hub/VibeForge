@@ -14,3 +14,8 @@ dist/
 # OS junk
 Thumbs.db
 Desktop.ini
+
+# Dev/debug screenshots
+app-screenshot-*.png
+codex-smoke-screen.png
+smoke.log
