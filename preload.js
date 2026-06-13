@@ -118,7 +118,8 @@ const api = {
   startOllamaServe: () => ipcRenderer.invoke('start-ollama-serve'),
   openOllama: () => ipcRenderer.invoke('open-ollama'),
   downloadUpdate: () => ipcRenderer.invoke('download-update'),
-  transcribeAudio: (data) => ipcRenderer.invoke('transcribe-audio', data),
+  transcribeWav: (data) => ipcRenderer.invoke('transcribe-wav', data),
+  readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   setupOpenSourceWhisper: () => ipcRenderer.invoke('setup-open-source-whisper'),
   onWhisperSetupLog: (cb) => ipcRenderer.on('whisper-setup-log', (_e, line) => cb(line))
 };

@@ -72,6 +72,43 @@ function isNewerVersion(latest, current) {
   return false;
 }
 
+// Shared download helper: follows redirects (GitHub/HuggingFace assets redirect to CDNs),
+// sends a User-Agent, optional progress callback (0-100).
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const req = https.get(url, { headers: { 'User-Agent': 'VibeForge' } }, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
+        file.close();
+        try { fs.unlinkSync(dest); } catch (e) {}
+        return downloadFile(res.headers.location, dest, onProgress).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        try { fs.unlinkSync(dest); } catch (e) {}
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+      }
+      const total = parseInt(res.headers['content-length'] || '0', 10);
+      let got = 0;
+      let lastPct = -1;
+      res.on('data', (chunk) => {
+        got += chunk.length;
+        if (onProgress && total > 0) {
+          const pct = Math.floor((got / total) * 100);
+          if (pct !== lastPct) { lastPct = pct; onProgress(pct); }
+        }
+      });
+      res.pipe(file);
+      file.on('finish', () => { file.close(); resolve(); });
+    });
+    req.on('error', (e) => {
+      file.close();
+      try { fs.unlinkSync(dest); } catch (err) {}
+      reject(e);
+    });
+  });
+}
+
 let mainWindow;
 let db;
 let peerServer = null;
@@ -1071,38 +1108,7 @@ function registerIpc() {
       if (!fs.existsSync(updateDir)) fs.mkdirSync(updateDir, { recursive: true });
       const newExe = path.join(updateDir, 'VibeForge-Portable-new.exe');
 
-      // Download with redirect follow and User-Agent
-      function downloadWithRedirect(currentUrl, dest) {
-        return new Promise((resolve, reject) => {
-          const file = fs.createWriteStream(dest);
-          const options = {
-            headers: { 'User-Agent': 'VibeForge' }
-          };
-          const req = https.get(currentUrl, options, (res) => {
-            if (res.statusCode === 301 || res.statusCode === 302) {
-              file.close();
-              fs.unlinkSync(dest);
-              return downloadWithRedirect(res.headers.location, dest).then(resolve).catch(reject);
-            }
-            if (res.statusCode !== 200) {
-              file.close();
-              return reject(new Error(`HTTP ${res.statusCode}`));
-            }
-            res.pipe(file);
-            file.on('finish', () => {
-              file.close();
-              resolve();
-            });
-          });
-          req.on('error', (e) => {
-            file.close();
-            fs.unlinkSync(dest);
-            reject(e);
-          });
-        });
-      }
-
-      await downloadWithRedirect(url, newExe);
+      await downloadFile(url, newExe);
 
       const current = process.execPath;
       let spawnArgs = [];
@@ -1120,112 +1126,146 @@ function registerIpc() {
     }
   });
 
-  // === Fully open source Whisper with ALL deps auto-installed (one-click for you and Nick) ===
-  // Uses openai-whisper (MIT) in a private venv so it "just boops" after setup. No manual deps, no build tools needed.
-  ipcMain.handle('transcribe-audio', async (e, { whisperPath, audioPath, sessionId }) => {
-    if (!whisperPath || !fs.existsSync(whisperPath)) {
-      return { ok: false, error: 'Run the One-click Setup Open Source Whisper button in Settings > AI Tools first (installs venv + torch + everything).' };
+  // === Whisper via whisper.cpp prebuilt binary (no Python, no pip, fully offline after setup) ===
+  const WHISPER_BIN_URL = 'https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.6/whisper-bin-x64.zip';
+  const WHISPER_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin';
+
+  function getWhisperDir() {
+    return path.join(app.getPath('userData'), 'whisper');
+  }
+
+  function findWhisperCli() {
+    const dir = getWhisperDir();
+    const candidates = [
+      path.join(dir, 'Release', 'whisper-cli.exe'),
+      path.join(dir, 'whisper-cli.exe'),
+      path.join(dir, 'Release', 'main.exe'),
+      path.join(dir, 'main.exe')
+    ];
+    return candidates.find(c => fs.existsSync(c)) || null;
+  }
+
+  function getWhisperModelPath() {
+    return path.join(getWhisperDir(), 'ggml-base.en.bin');
+  }
+
+  // Transcribe a 16kHz mono WAV buffer sent from the renderer.
+  // Used both for live caption chunks and full post-session transcription.
+  ipcMain.handle('transcribe-wav', async (e, { wav, sessionId, appendToNotes }) => {
+    const cli = findWhisperCli();
+    const model = getWhisperModelPath();
+    if (!cli || !fs.existsSync(model)) {
+      return { ok: false, error: 'Whisper not set up. One click in Settings > AI Tools installs it (~150 MB, one time).' };
+    }
+    const tempDir = path.join(app.getPath('userData'), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const wavPath = path.join(tempDir, `chunk-${Date.now()}-${Math.floor(Math.random() * 1e6)}.wav`);
+    try {
+      fs.writeFileSync(wavPath, Buffer.from(wav));
+    } catch (err) {
+      return { ok: false, error: 'Failed to write temp wav: ' + err.message };
     }
     return new Promise((resolve) => {
-      // venv's whisper CLI
-      const args = [audioPath, '--model', 'tiny', '--language', 'English', '--output_format', 'txt'];
-      const proc = spawn(whisperPath, args, { shell: false });
+      const args = ['-m', model, '-f', wavPath, '-l', 'en', '-nt', '-np', '-t', '4'];
+      const proc = spawn(cli, args, { shell: false, windowsHide: true });
       let out = '';
+      let errOut = '';
       proc.stdout.on('data', (d) => { out += d.toString(); });
-      proc.stderr.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { errOut += d.toString(); });
       proc.on('close', (code) => {
-        let transcript = out.trim();
-        const sideTxt = audioPath.replace(/\.[^/.]+$/, '.txt');
-        if (fs.existsSync(sideTxt)) {
-          try { transcript = fs.readFileSync(sideTxt, 'utf8').trim() + '\n' + transcript; } catch (e) {}
+        try { fs.unlinkSync(wavPath); } catch (e) {}
+        // Strip whisper's non-speech annotations: [BLANK_AUDIO], [silence], (air whooshing),
+        // (music), *applause* etc. Real speech is what remains.
+        let transcript = out.trim()
+          .replace(/\[[^\]]*\]/g, '')
+          .replace(/\([^)]*\)/g, '')
+          .replace(/\*[^*]*\*/g, '')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        if (code !== 0 && !transcript) {
+          return resolve({ ok: false, error: `whisper exited ${code}: ${errOut.slice(-300)}` });
         }
-        if (transcript) {
+        if (transcript && appendToNotes && sessionId) {
           try {
-            const stmt = db.prepare("UPDATE sessions SET notes = COALESCE(notes,'') || ? WHERE id = ?");
-            stmt.run('\n\n[Transcript via fully installed Open Source Whisper]\n' + transcript, sessionId);
+            db.prepare("UPDATE sessions SET notes = COALESCE(notes,'') || ? WHERE id = ?")
+              .run('\n\n[Whisper transcript]\n' + transcript, sessionId);
           } catch (e) {}
         }
-        resolve({ ok: code === 0 || !!transcript, transcript: transcript || 'No output' });
+        resolve({ ok: true, transcript });
       });
-      proc.on('error', (err) => resolve({ ok: false, error: err.message }));
+      proc.on('error', (err) => {
+        try { fs.unlinkSync(wavPath); } catch (e) {}
+        resolve({ ok: false, error: err.message });
+      });
     });
   });
 
-  // The one-click that installs EVERYTHING (venv + package + torch + ffmpeg + tiny model)
+  // Read any local file as bytes (renderer uses this to decode saved recordings for transcription)
+  ipcMain.handle('read-file-buffer', (e, filePath) => {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath);
+  });
+
+  // One-click Whisper setup: downloads the prebuilt whisper.cpp engine (~4 MB) and the
+  // ggml-base.en model (~142 MB). No Python, no pip, no build tools. Works offline after.
   ipcMain.handle('setup-open-source-whisper', async (e) => {
-    const userData = app.getPath('userData');
-    const venvDir = path.join(userData, 'whisper-venv');
-    const cli = path.join(venvDir, 'Scripts', 'whisper.exe');
+    const log = (m) => mainWindow && mainWindow.webContents.send('whisper-setup-log', m);
+    const whisperDir = getWhisperDir();
+    const modelPath = getWhisperModelPath();
 
-    if (fs.existsSync(cli)) {
+    let cli = findWhisperCli();
+    if (cli && fs.existsSync(modelPath)) {
       setSetting('whisper_path', cli);
-      return { ok: true, whisperPath: cli, alreadySetup: true };
+      setSetting('whisper_model', modelPath);
+      return { ok: true, whisperPath: cli, modelPath, alreadySetup: true };
     }
-
-    let pythonCmd = null;
-    for (const c of ['python', 'py']) {
-      try {
-        const out = await new Promise((res, rej) => exec(`${c} --version`, (err, o) => err ? rej() : res(o)));
-        if (out.toLowerCase().includes('python 3.')) { pythonCmd = c; break; }
-      } catch (e) {}
-    }
-    if (!pythonCmd) return { ok: false, error: 'Python 3.8+ not found. Install from python.org (Add to PATH), then retry setup.' };
-
-    if (fs.existsSync(venvDir)) { try { fs.rmSync(venvDir, { recursive: true, force: true }); } catch (e) {} }
 
     try {
-      await new Promise((res, rej) => {
-        const p = spawn(pythonCmd, ['-m', 'venv', venvDir], { shell: true });
-        p.on('close', c => c === 0 ? res() : rej(new Error('venv failed')));
-        p.on('error', rej);
-      });
+      if (!fs.existsSync(whisperDir)) fs.mkdirSync(whisperDir, { recursive: true });
 
-      const py = path.join(venvDir, 'Scripts', 'python.exe');
+      if (!cli) {
+        log('Downloading whisper.cpp engine (~4 MB)...\n');
+        const zipPath = path.join(whisperDir, 'whisper-bin-x64.zip');
+        await downloadFile(WHISPER_BIN_URL, zipPath);
+        log('Extracting engine...\n');
+        await new Promise((res, rej) => {
+          const p = spawn('powershell', ['-NoProfile', '-Command',
+            `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}' -Force`],
+            { windowsHide: true });
+          p.on('close', c => c === 0 ? res() : rej(new Error('zip extract failed')));
+          p.on('error', rej);
+        });
+        try { fs.unlinkSync(zipPath); } catch (e) {}
+        cli = findWhisperCli();
+        if (!cli) throw new Error('whisper-cli.exe not found after extraction');
+        log('Engine ready: ' + cli + '\n');
+      }
 
-      // Always use python -m pip (never the pip.exe launcher directly) — this avoids the common Windows
-      // "No module named 'pip._internal'" corruption inside venvs. Also upgrade pip first.
-      await new Promise((res, rej) => {
-        const p = spawn(py, ['-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel'], { shell: true });
-        p.stdout.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.stderr.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.on('close', c => c === 0 ? res() : rej(new Error('pip upgrade failed inside venv')));
-        p.on('error', rej);
-      });
+      if (!fs.existsSync(modelPath)) {
+        log('Downloading speech model ggml-base.en (~142 MB, one time)...\n');
+        let lastShown = -10;
+        await downloadFile(WHISPER_MODEL_URL, modelPath, (pct) => {
+          if (pct >= lastShown + 10) { lastShown = pct; log(`  model download: ${pct}%\n`); }
+        });
+        log('Model ready.\n');
+      }
 
-      // Install torch CPU first (avoids CUDA bloat and common install failures), then the git dep for latest openai/whisper
-      await new Promise((res, rej) => {
-        const p = spawn(py, ['-m', 'pip', 'install', 'torch', 'torchvision', 'torchaudio', '--index-url', 'https://download.pytorch.org/whl/cpu'], { shell: true });
-        p.stdout.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.stderr.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.on('close', c => c === 0 ? res() : rej(new Error('torch cpu install failed')));
-        p.on('error', rej);
-      });
-      await new Promise((res, rej) => {
-        const p = spawn(py, ['-m', 'pip', 'install', 'git+https://github.com/openai/whisper.git'], { shell: true });
-        p.stdout.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.stderr.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.on('close', c => c === 0 ? res() : rej(new Error('openai/whisper git install failed')));
-        p.on('error', rej);
-      });
-
-      // Pre-download model
-      await new Promise((res, rej) => {
-        const p = spawn(py, ['-c', "import whisper; whisper.load_model('tiny'); print('model ready')"], { shell: true });
-        p.stdout.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.stderr.on('data', d => mainWindow && mainWindow.webContents.send('whisper-setup-log', d.toString()));
-        p.on('close', c => c === 0 ? res() : rej(new Error('model download failed')));
-        p.on('error', rej);
-      });
-
-      const cli = path.join(venvDir, 'Scripts', 'whisper.exe');
       setSetting('whisper_path', cli);
-      mainWindow && mainWindow.webContents.send('whisper-setup-log', '\n=== ALL DONE! Venv + every dep + model installed. Ready to transcribe. ===\n');
-      return { ok: true, whisperPath: cli };
-    } catch (e) {
-      mainWindow && mainWindow.webContents.send('whisper-setup-log', '\nERROR: ' + e.message + '\n');
-      // Clean up broken venv so retry works
-      try { if (fs.existsSync(venvDir)) fs.rmSync(venvDir, { recursive: true, force: true }); } catch (_) {}
-      return { ok: false, error: e.message + ' (venv cleaned for retry). Make sure Python 3.8+ (ideally 3.9-3.12) is installed and in PATH.' };
+      setSetting('whisper_model', modelPath);
+
+      // Clean up the old broken Python venv from earlier attempts (frees ~1.5 GB)
+      const oldVenv = path.join(app.getPath('userData'), 'whisper-venv');
+      if (fs.existsSync(oldVenv)) {
+        log('Removing old broken Python venv (frees ~1.5 GB)...\n');
+        try { fs.rmSync(oldVenv, { recursive: true, force: true }); } catch (e) {}
+      }
+
+      log('\n=== DONE. Whisper is installed — transcription now works fully offline. ===\n');
+      return { ok: true, whisperPath: cli, modelPath };
+    } catch (err) {
+      log('\nERROR: ' + err.message + '\n');
+      return { ok: false, error: err.message };
     }
   });
 
@@ -1381,13 +1421,14 @@ function registerIpc() {
     return dist;
   });
 
-  // === Transcription / Whisper settings (real path + check, but no main button until fully wired) ===
-  ipcMain.handle('whisper-check', async (e, whisperPath) => {
-    if (!whisperPath) return { configured: false, message: 'No path set' };
-    try {
-      if (fs.existsSync(whisperPath)) return { configured: true, path: whisperPath };
-      return { configured: false, message: 'Path does not exist' };
-    } catch (e) { return { configured: false, message: e.message }; }
+  // === Transcription / Whisper status check ===
+  ipcMain.handle('whisper-check', async () => {
+    const cli = findWhisperCli();
+    const model = getWhisperModelPath();
+    const modelOk = fs.existsSync(model);
+    if (cli && modelOk) return { configured: true, path: cli, model };
+    if (cli && !modelOk) return { configured: false, message: 'Engine installed but model missing — run setup again' };
+    return { configured: false, message: 'Not installed — run the one-click setup' };
   });
 
   ipcMain.handle('whisper-open-help', () => {

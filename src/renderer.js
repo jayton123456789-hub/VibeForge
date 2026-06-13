@@ -352,7 +352,7 @@ async function openSession(id) {
         <div class="font-medium mb-1.5">Recorded Audio / Screen</div>
         <video controls src="file://${s.audio_path}" class="w-full max-h-[420px] rounded-2xl bg-black"></video>
         <div class="mt-2">
-          <button onclick="transcribeSession('${s.id}')" class="px-3 py-1 text-xs border border-emerald-700 text-emerald-400 rounded-2xl">Transcribe with Open Source Whisper (whisper.cpp)</button>
+          <button onclick="transcribeSession('${s.id}')" class="px-3 py-1 text-xs border border-emerald-700 text-emerald-400 rounded-2xl">Transcribe (local Whisper)</button>
         </div>
       </div>
       ` : ''}
@@ -795,7 +795,13 @@ async function renderLiveRoom(session) {
   let displayStream = null;
   let captureLabel = 'Mic only';
   let liveTranscript = '';
-  let recognition = null;
+  // Live caption state (real local Whisper, chunked)
+  let captionNode = null;
+  let captionTimer = null;
+  let captionBusy = false;
+  let captionBuf = [];
+  let captionBufLen = 0;
+  let captionRate = 48000;
 
   const modeLabel = session.mode === 'manual' ? 'Manual Session' : 'Room Session';
   const isRoom = session.mode !== 'manual';
@@ -850,10 +856,10 @@ async function renderLiveRoom(session) {
 
       <div class="mb-4">
         <div class="font-medium mb-1 flex items-center gap-2">
-          Live Convo / Transcript <span class="text-[10px] text-zinc-500">(typewriter • real-time speech)</span>
+          Live Transcript <span class="text-[10px] text-zinc-500">(local Whisper • a few seconds behind speech)</span>
         </div>
         <div id="live-transcript" class="bg-black/60 border border-zinc-800 rounded-2xl p-3 text-sm h-24 overflow-auto font-mono whitespace-pre-wrap leading-snug"></div>
-        <div class="text-[10px] text-zinc-500 mt-1">Speaks → types live with classic typewriter feel. Appends to notes on stop. (Uses built-in browser rec for low latency; full Whisper accuracy available after.)</div>
+        <div class="text-[10px] text-zinc-500 mt-1">Real on-device transcription — types in as you talk. Saved into session notes on Stop.</div>
       </div>
       ` : ''}
 
@@ -933,7 +939,8 @@ async function renderLiveRoom(session) {
 
   window.stopLiveRoom = async function(id) {
     clearInterval(timerInterval);
-    if (recognition) { try { recognition.stop(); } catch(e){} }
+    if (captionTimer) { try { clearInterval(captionTimer); } catch(e){} captionTimer = null; }
+    if (captionNode) { try { captionNode.disconnect(); } catch(e){} captionNode = null; }
     if (isRecording && mediaRecorder) {
       try { mediaRecorder.stop(); } catch(e){}
       isRecording = false;
@@ -950,7 +957,7 @@ async function renderLiveRoom(session) {
     // save notes + live transcript (if any)
     let finalNotes = (document.getElementById('live-notes') || {}).value || notes;
     if (liveTranscript && liveTranscript.trim()) {
-      finalNotes = finalNotes + (finalNotes ? '\n\n' : '') + '[Live transcript — typewriter]\n' + liveTranscript.trim();
+      finalNotes = finalNotes + (finalNotes ? '\n\n' : '') + '[Live transcript]\n' + liveTranscript.trim();
     }
 
     await window.vibeforge.updateSessionNotes(id, finalNotes);
@@ -1111,49 +1118,66 @@ async function renderLiveRoom(session) {
       }
       drawMeter();
 
-      // === Live typewriter transcript via browser SpeechRecognition (real-time, zero extra deps) ===
+      // === Live captions via local Whisper (chunked, real transcription — no cloud, no browser API) ===
+      // Mic PCM accumulates; every few seconds a chunk is resampled to 16k WAV and run through
+      // whisper.cpp in the main process. Self-pacing: while one chunk transcribes, audio keeps buffering.
       const tEl = document.getElementById('live-transcript');
       try {
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (SR && tEl) {
-          recognition = new SR();
-          recognition.continuous = true;
-          recognition.interimResults = true;
-          recognition.lang = 'en-US';
-          recognition.onresult = (ev) => {
-            let deltaFinal = '';
-            let interim = '';
-            for (let i = ev.resultIndex; i < ev.results.length; ++i) {
-              const txt = ev.results[i][0].transcript;
-              if (ev.results[i].isFinal) {
-                deltaFinal += txt + ' ';
-              } else {
-                interim = txt;
+        const wCheck = await window.vibeforge.whisperCheck();
+        if (tEl && wCheck && wCheck.configured) {
+          captionRate = audioContext.sampleRate;
+          captionNode = audioContext.createScriptProcessor(4096, 1, 1);
+          captionNode.onaudioprocess = (ev) => {
+            const data = ev.inputBuffer.getChannelData(0);
+            captionBuf.push(new Float32Array(data));
+            captionBufLen += data.length;
+            // cap backlog at ~30s so a slow machine can't spiral
+            while (captionBufLen > captionRate * 30 && captionBuf.length > 1) {
+              captionBufLen -= captionBuf.shift().length;
+            }
+          };
+          source.connect(captionNode);
+          captionNode.connect(audioContext.destination);
+
+          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Listening… captions appear a few seconds behind speech.</span>';
+          let firstCaption = true;
+
+          captionTimer = setInterval(async () => {
+            if (captionBusy) return;
+            if (captionBufLen < captionRate * 4) return; // wait for ~4s of audio
+            const merged = new Float32Array(captionBufLen);
+            let o = 0;
+            for (const c of captionBuf) { merged.set(c, o); o += c.length; }
+            captionBuf = []; captionBufLen = 0;
+
+            // silence gate: skip chunks with no real signal (whisper hallucinates on silence)
+            let sum = 0, n = 0;
+            for (let i = 0; i < merged.length; i += 16) { sum += merged[i] * merged[i]; n++; }
+            if (Math.sqrt(sum / n) < 0.008) return;
+
+            captionBusy = true;
+            try {
+              const wav = encodeWav16k(resampleTo16k(merged, captionRate));
+              const res = await window.vibeforge.transcribeWav({ wav });
+              if (res && res.ok && res.transcript) {
+                const text = res.transcript.replace(/\s+/g, ' ').trim();
+                if (text) {
+                  if (firstCaption) { tEl.textContent = ''; firstCaption = false; }
+                  liveTranscript += text + ' ';
+                  typewriterAppend(text + ' ', tEl);
+                }
               }
+            } catch (e) {} finally {
+              captionBusy = false;
             }
-            if (deltaFinal) {
-              liveTranscript += deltaFinal;
-              // append only the new chunk with typewriter animation
-              typewriterAppend(deltaFinal, tEl);
-            } else if (interim && tEl) {
-              // show interim live (no animation for interim to stay responsive)
-              tEl.textContent = (liveTranscript + '\n' + interim + '…').trim();
-              tEl.scrollTop = tEl.scrollHeight;
-            }
-          };
-          recognition.onerror = () => {};
-          recognition.onend = () => {
-            if (isRecording && recognition) {
-              try { recognition.start(); } catch(e){}
-            }
-          };
-          recognition.start();
-          if (micStatus) micStatus.textContent = 'Recording + live captions';
+          }, 2000);
+
+          if (micStatus) micStatus.textContent = 'Recording + live Whisper captions';
         } else if (tEl) {
-          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions: browser speech rec not available in this env.</span>';
+          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions off — run the one-click Whisper setup in Settings → AI Tools to enable them.</span>';
         }
       } catch (e) {
-        if (tEl) tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions unavailable.</span>';
+        if (tEl) tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions unavailable: ' + e.message + '</span>';
       }
 
     } catch (err) {
@@ -1844,17 +1868,17 @@ async function renderSettingsView(content) {
         </div>
 
         <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
-          <div class="text-lg font-semibold mb-1">Transcription (Open Source Whisper)</div>
-          <div class="text-xs text-zinc-400 mb-3">Fully open source. One-click setup below installs Python venv + openai-whisper (all deps: torch, ffmpeg, etc.) + tiny model. Then just click Transcribe in any session with audio. Works for you and Nick with zero hassle after setup.</div>
+          <div class="text-lg font-semibold mb-1">Transcription (Whisper, fully local)</div>
+          <div class="text-xs text-zinc-400 mb-3">Powered by whisper.cpp — no Python, no dependencies. One-click setup downloads the engine + speech model (~150 MB, one time). After that: live captions during recording + full transcription of any saved session, all offline.</div>
 
-          <input id="set-whisper" value="${settings.whisper_path || ''}" placeholder="Path to whisper CLI (set automatically after setup)" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base mb-2" readonly>
+          <input id="set-whisper" value="${settings.whisper_path || ''}" placeholder="Engine path (set automatically after setup)" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base mb-2" readonly>
           <div class="flex gap-2 mb-2">
             <button onclick="checkWhisper()" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">Check Setup</button>
-            <button onclick="window.openWhisperCpp()" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">About Open Source Whisper</button>
+            <button onclick="window.openWhisperCpp()" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">About whisper.cpp</button>
           </div>
-          <button onclick="setupOpenSourceWhisper(this)" class="w-full py-2.5 bg-emerald-600 rounded-2xl text-sm font-medium mb-2">One-click Setup Open Source Whisper (all deps + model, ~1-2GB one-time download)</button>
+          <button onclick="setupOpenSourceWhisper(this)" class="w-full py-2.5 bg-emerald-600 rounded-2xl text-sm font-medium mb-2">One-click Whisper Setup (~150 MB one-time download)</button>
           <div id="whisper-setup-log" class="h-20 overflow-auto bg-black/40 text-[10px] p-2 rounded font-mono"></div>
-          <div class="text-[10px] text-zinc-500 mt-1">After setup, the Transcribe button appears in Session Detail for any audio recording. Fully self-contained in your app data. No closed-source bits.</div>
+          <div id="whisper-status" class="text-[10px] text-zinc-500 mt-1">After setup: live captions in Room sessions + a Transcribe button on any recording. Fully offline.</div>
         </div>
       </div>
     `;
@@ -2017,81 +2041,133 @@ window.openOllama = async function(btn) {
   if (btn) btn.disabled = false;
 };
 
+// === Audio → 16kHz mono WAV conversion (whisper.cpp reads wav natively; webm needs decoding) ===
+function encodeWav16k(float32) {
+  const sampleRate = 16000;
+  const buffer = new ArrayBuffer(44 + float32.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + float32.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // PCM
+  view.setUint16(22, 1, true);          // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);         // 16-bit
+  writeStr(36, 'data');
+  view.setUint32(40, float32.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    off += 2;
+  }
+  return new Uint8Array(buffer);
+}
+
+// Decode any audio bytes (webm/ogg/mp3...) and resample to 16k mono WAV bytes
+async function audioBytesToWav16k(bytes) {
+  const ab = bytes.buffer ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) : bytes;
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try {
+    decoded = await ac.decodeAudioData(ab);
+  } finally {
+    try { ac.close(); } catch (e) {}
+  }
+  const frames = Math.max(1, Math.ceil(decoded.duration * 16000));
+  const off = new OfflineAudioContext(1, frames, 16000);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const rendered = await off.startRendering();
+  return encodeWav16k(rendered.getChannelData(0));
+}
+
+// Simple linear resampler for raw Float32 PCM (used by live captions)
+function resampleTo16k(float32, fromRate) {
+  if (fromRate === 16000) return float32;
+  const ratio = fromRate / 16000;
+  const outLen = Math.floor(float32.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const idx = i * ratio;
+    const lo = Math.floor(idx);
+    const hi = Math.min(lo + 1, float32.length - 1);
+    out[i] = float32[lo] + (float32[hi] - float32[lo]) * (idx - lo);
+  }
+  return out;
+}
+
 window.transcribeSession = async function(sessionId) {
   const sessions = await window.vibeforge.getSessions(currentProject.id);
   const s = sessions.find(x => x.id === sessionId);
   if (!s || !s.audio_path) return;
-  const settings = await window.vibeforge.getSettings();
-  const wp = settings.whisper_path;
-  if (!wp) {
-    showToast('Run the One-click Setup Open Source Whisper first in AI Tools tab (installs all deps).');
+  const check = await window.vibeforge.whisperCheck();
+  if (!check || !check.configured) {
+    showToast('Whisper not set up yet — one click in Settings > AI Tools (about 150 MB, one time).');
     switchView('settings');
     return;
   }
-  const res = await window.vibeforge.transcribeAudio({ whisperPath: wp, audioPath: s.audio_path, sessionId });
-  if (res && res.ok) {
-    showToast('Transcript added to session notes');
-    await openSession(sessionId);
-  } else {
-    showToast('Transcription failed: ' + (res ? res.error : 'check setup'));
+  showToast('Transcribing locally with Whisper... this can take a bit for long recordings.');
+  try {
+    const bytes = await window.vibeforge.readFileBuffer(s.audio_path);
+    if (!bytes) { showToast('Recording file not found on disk.'); return; }
+    const wav = await audioBytesToWav16k(bytes);
+    const res = await window.vibeforge.transcribeWav({ wav, sessionId, appendToNotes: true });
+    if (res && res.ok) {
+      showToast(res.transcript ? 'Transcript added to session notes' : 'Done — no speech detected in the recording');
+      await openSession(sessionId);
+    } else {
+      showToast('Transcription failed: ' + (res ? res.error : 'unknown'));
+    }
+  } catch (e) {
+    showToast('Transcription failed: ' + e.message);
   }
 };
 
 window.setupOpenSourceWhisper = async function(btn) {
   const logEl = document.getElementById('whisper-setup-log');
   if (btn) btn.disabled = true;
-  if (logEl) logEl.textContent = 'Starting one-click open source Whisper setup (Python venv + all deps + model)...\nThis is one-time, ~1-2GB download. Go grab coffee.\n';
-
-  // Listen for logs
-  const onLog = (line) => {
-    if (logEl) {
-      logEl.textContent += line;
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-  };
-  if (window.vibeforge.onWhisperSetupLog) {
-    window.vibeforge.onWhisperSetupLog((line) => {
-      const logEl = document.getElementById('whisper-setup-log');
-      if (logEl) {
-        logEl.textContent += line;
-        logEl.scrollTop = logEl.scrollHeight;
-      }
-    });
-  }
-
-  // Auto setup Whisper on launch if Python available and not yet set up.
-  // This way, on launch you (and Nick) can just boop and use transcription after the one-time deps install.
-  setTimeout(async () => {
-    try {
-      const settings = await window.vibeforge.getSettings();
-      if (!settings.whisper_path) {
-        // Run setup in background; it will set the path and show toast when done.
-        // Non-blocking, user sees progress only if they open AI Tools tab.
-        window.vibeforge.setupOpenSourceWhisper().then((res) => {
-          if (res && res.ok && !res.alreadySetup) {
-            showToast('Open source Whisper + all deps installed in background. Ready to transcribe!');
-          }
-        }).catch(() => {
-          // Silent fail; button in Settings will show clear error if needed.
-        });
-      }
-    } catch (e) {
-      // ignore
-    }
-  }, 8000); // after launch settles
+  if (logEl) logEl.textContent = 'Setting up Whisper (whisper.cpp engine + speech model, ~150 MB one-time download)...\nNo Python, no dependencies — works offline after this.\n';
 
   const res = await window.vibeforge.setupOpenSourceWhisper();
   if (res && res.ok) {
-    if (logEl) logEl.textContent += '\nSetup complete! All deps installed. Whisper path set. You can now transcribe in sessions.\n';
-    showToast('Whisper ready with all open source deps! Restart app or switch tabs to see.');
-    // Refresh settings to show the new path
+    if (logEl) logEl.textContent += res.alreadySetup ? '\nAlready installed and ready.\n' : '\nSetup complete. Transcription + live captions are ready.\n';
+    showToast('Whisper ready — transcription works fully offline now.');
     setTimeout(() => switchView('settings'), 500);
   } else {
-    if (logEl) logEl.textContent += '\nSetup failed: ' + (res ? res.error : 'unknown') + '\nMake sure Python 3.8+ is installed and in PATH.\n';
-    showToast('Setup failed. See log. Need Python? python.org');
+    if (logEl) logEl.textContent += '\nSetup failed: ' + (res ? res.error : 'unknown') + '\nCheck your internet connection and retry.\n';
+    showToast('Whisper setup failed — see the log in AI Tools.');
   }
   if (btn) btn.disabled = false;
 };
+
+// Stream whisper setup progress into the AI Tools log box (single top-level listener)
+if (window.vibeforge.onWhisperSetupLog) {
+  window.vibeforge.onWhisperSetupLog((line) => {
+    const el = document.getElementById('whisper-setup-log');
+    if (el) {
+      el.textContent += line;
+      el.scrollTop = el.scrollHeight;
+    }
+  });
+}
+
+// Gentle first-launch nudge if Whisper isn't set up yet (no silent auto-download of 150MB)
+setTimeout(async () => {
+  try {
+    const check = await window.vibeforge.whisperCheck();
+    if (!check || !check.configured) {
+      showToast('Tip: enable transcription + live captions with one click in Settings → AI Tools');
+    }
+  } catch (e) {}
+}, 6000);
 
 if (window.vibeforge.onGithubDeviceCode) {
   window.vibeforge.onGithubDeviceCode((data) => {
@@ -2414,11 +2490,10 @@ async function testSelectedModel() {
 }
 
 async function checkWhisper() {
-  const p = (document.getElementById('set-whisper') || {}).value || '';
   const st = document.getElementById('whisper-status');
-  const r = await window.vibeforge.whisperCheck(p);
-  if (st) st.textContent = r.configured ? ('Configured: ' + r.path) : ('Not configured: ' + (r.message || 'set path above then Save'));
-  showToast(r.configured ? 'Whisper path OK' : 'Whisper not ready yet');
+  const r = await window.vibeforge.whisperCheck();
+  if (st) st.textContent = r.configured ? ('Ready: ' + r.path) : ('Not ready: ' + (r.message || 'run the one-click setup'));
+  showToast(r.configured ? 'Whisper is ready (engine + model installed)' : 'Whisper not set up yet — use the one-click setup');
 }
 
 async function checkForAppUpdates() {
