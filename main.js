@@ -2,7 +2,6 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu, desktopCapturer, sessi
 const path = require('path');
 const fs = require('fs');
 const { exec, spawn } = require('child_process');
-const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
 const os = require('os');
@@ -156,6 +155,44 @@ function getOllamaExe() {
   return 'ollama';
 }
 
+function getSetupMarkerPath() {
+  return path.join(app.getPath('userData'), 'setup-complete.json');
+}
+
+function isSetupComplete() {
+  return fs.existsSync(getSetupMarkerPath());
+}
+
+function markSetupComplete(reason = 'setup') {
+  try {
+    const marker = getSetupMarkerPath();
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify({ completedAt: new Date().toISOString(), reason }, null, 2), 'utf8');
+  } catch (e) {
+    writeLaunchLog('Could not write setup marker', e);
+  }
+}
+
+function checkVcRuntimeInstalled() {
+  const needed = ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll'];
+  const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  return needed.every(name => fs.existsSync(path.join(sys, name)));
+}
+
+async function installVcRuntime(onLog) {
+  if (checkVcRuntimeInstalled()) return { ok: true, alreadyInstalled: true };
+  const tempDir = path.join(os.tmpdir(), 'VibeForgeSetup');
+  fs.mkdirSync(tempDir, { recursive: true });
+  const installer = path.join(tempDir, 'vc_redist.x64.exe');
+  onLog && onLog('Downloading Microsoft Visual C++ runtime...\n');
+  await downloadFile('https://aka.ms/vs/17/release/vc_redist.x64.exe', installer, pct => {
+    if (pct % 20 === 0) onLog && onLog(`  VC++ runtime: ${pct}%\n`);
+  });
+  onLog && onLog('Installing Microsoft Visual C++ runtime...\n');
+  const result = await runSetupProcess(installer, ['/install', '/quiet', '/norestart'], onLog, { windowsHide: false });
+  return { ...result, installed: checkVcRuntimeInstalled() };
+}
+
 function getOllamaCommand() {
   const exe = getOllamaExe();
   return exe.includes(' ') ? `"${exe}"` : exe;
@@ -206,6 +243,7 @@ let peerJsHost = null;  // PeerJS Peer instance (host side)
 let peerJsConn = null;  // active PeerJS DataConnection
 let peerJsId = null;    // our PeerJS peer ID (the room code)
 let pendingIncomingFile = null; // tracks incoming file metadata across chunks
+let Database = null;
 
 // Config for tray/close later, but minimal now - always quit on close
 let appConfig = {};
@@ -241,6 +279,19 @@ function getRecordingsDir() {
 
 function initDb() {
   const dbPath = getDbPath();
+  if (!Database) {
+    try {
+      Database = require('better-sqlite3');
+    } catch (err) {
+      writeLaunchLog('Failed to load better-sqlite3. Microsoft Visual C++ Runtime may be missing.', err);
+      dialog.showErrorBox(
+        'VibeForge needs a Windows runtime',
+        'VibeForge could not load its local database engine. Run the setup wizard again, or install Microsoft Visual C++ Redistributable x64, then reopen VibeForge.\n\nA log was written to launch-error.log.'
+      );
+      app.quit();
+      throw err;
+    }
+  }
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
 
@@ -335,11 +386,21 @@ function initDb() {
 }
 
 function getSetting(key) {
+  if (!db) {
+    const defaults = {
+      ollama_url: 'http://127.0.0.1:11434',
+      ollama_model: 'llama3.2',
+      github_owner: 'jayton123456789-hub',
+      github_repo: 'VibeForge'
+    };
+    return defaults[key];
+  }
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : null;
 }
 
 function setSetting(key, value) {
+  if (!db) initDb();
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
@@ -1534,7 +1595,12 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle('splash-skip-setup', () => {
+  ipcMain.handle('splash-skip-setup', async () => {
+    try {
+      await installVcRuntime(() => {});
+    } catch (err) {
+      writeLaunchLog('Required runtime install failed during setup skip', err);
+    }
     markFirstRunComplete();
     if (!mainWindow) createWindow();
     else closeSplash();
@@ -1578,12 +1644,15 @@ function splashDone() {
 }
 
 function isFirstRun() {
+  if (!isSetupComplete()) return true;
   if (!db) return false;
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('first_run_complete');
   return !row || row.value !== '1';
 }
 
 function markFirstRunComplete() {
+  markSetupComplete('first-run');
+  if (!db) initDb();
   if (db) db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('first_run_complete', '1');
   firstRunPending = false;
 }
@@ -1592,6 +1661,18 @@ function markFirstRunComplete() {
 async function runFirstRunSetup() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  splashStep('runtime', 'active', 'Checking Microsoft Visual C++ runtime...\n');
+  try {
+    const vcResult = await installVcRuntime(d => splashStep('runtime', 'active', d));
+    if (vcResult.ok || vcResult.installed || checkVcRuntimeInstalled()) {
+      splashStep('runtime', 'done', vcResult.alreadyInstalled ? 'Windows runtime already installed.\n' : 'Windows runtime ready.\n');
+    } else {
+      splashStep('runtime', 'error', `Windows runtime install may have failed (code ${vcResult.code || 'unknown'}). The app will still try to continue.\n`);
+    }
+  } catch (err) {
+    splashStep('runtime', 'error', `Windows runtime setup failed: ${err.message}\n`);
+  }
+  await sleep(200);
   // ── Step 1: check existing dependencies ──────────────────────────────────
   splashStep('deps', 'active', 'Checking existing installation…\n');
   await sleep(400);
@@ -1926,31 +2007,36 @@ async function performAutoUpdateCheck(win) {
 app.whenReady().then(() => {
   // Show the splash IMMEDIATELY so launch feels instant, before the (slower) DB init.
   createSplash();
-  initDb();
+  const needsFirstRunSetup = !isSetupComplete();
+  if (!needsFirstRunSetup) initDb();
 
   // Developer startup log for data debugging (visible when launched from console/bat)
   console.log('=== VibeForge Startup Debug ===');
   console.log('App name:', app.getName());
   console.log('userData path:', app.getPath('userData'));
-  const dbp = getDbPath();
-  console.log('DB path:', dbp);
-  console.log('DB file exists:', fs.existsSync(dbp));
-  try {
-    const pc = db.prepare('SELECT COUNT(*) as c FROM projects').get().c;
-    const sc = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
-    const tc = db.prepare('SELECT COUNT(*) as c FROM tasks').get().c;
-    const ic = db.prepare('SELECT COUNT(*) as c FROM ideas').get().c;
-    const dc = db.prepare('SELECT COUNT(*) as c FROM decisions').get().c;
-    console.log('Counts - projects:', pc, 'sessions:', sc, 'tasks:', tc, 'ideas:', ic, 'decisions:', dc);
-  } catch (e) {
-    console.log('Counts query failed (empty DB?):', e.message);
+  if (db) {
+    const dbp = getDbPath();
+    console.log('DB path:', dbp);
+    console.log('DB file exists:', fs.existsSync(dbp));
+    try {
+      const pc = db.prepare('SELECT COUNT(*) as c FROM projects').get().c;
+      const sc = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
+      const tc = db.prepare('SELECT COUNT(*) as c FROM tasks').get().c;
+      const ic = db.prepare('SELECT COUNT(*) as c FROM ideas').get().c;
+      const dc = db.prepare('SELECT COUNT(*) as c FROM decisions').get().c;
+      console.log('Counts - projects:', pc, 'sessions:', sc, 'tasks:', tc, 'ideas:', ic, 'decisions:', dc);
+    } catch (e) {
+      console.log('Counts query failed (empty DB?):', e.message);
+    }
+  } else {
+    console.log('DB not loaded yet; first-run dependency setup pending.');
   }
   console.log('================================');
 
   registerIpc();
   if (!isUpdateMode) {
     // First-run shows the dependency setup wizard first. Normal launch opens immediately.
-    firstRunPending = isFirstRun();
+    firstRunPending = needsFirstRunSetup;
     if (!firstRunPending) createWindow();
   }
   // Note: update mode process is headless replacer (scheduled above), no window.

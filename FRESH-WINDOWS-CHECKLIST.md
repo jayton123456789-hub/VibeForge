@@ -12,6 +12,10 @@ VibeForge is shipped as a portable Electron app. A brand-new Windows 10/11 PC sh
 
 ## Installed or downloaded by first-run setup
 
+- Microsoft Visual C++ Redistributable x64
+  - Required by native SQLite (`better-sqlite3`) on fresh Windows installs.
+  - Downloaded from Microsoft's `aka.ms` VC++ redist URL.
+  - Installed before VibeForge loads the local database engine.
 - Ollama for Windows
   - First tries `winget install Ollama.Ollama`.
   - If `winget` is missing or fails, tries Ollama's official PowerShell installer: `irm https://ollama.com/install.ps1 | iex`.
