@@ -1169,8 +1169,12 @@ function registerIpc() {
     } catch (err) {
       return { ok: false, error: 'Failed to write temp wav: ' + err.message };
     }
+    // Initial prompt biases Whisper toward vocabulary we actually use, so dev terms
+    // and tool names get spelled right instead of guessed phonetically.
+    const vocab = getSetting('whisper_prompt') ||
+      'VibeForge, Codex, Claude, Cursor, Ollama, Whisper, GitHub, Electron, Node.js, npm, API, repo, UI, UX, frontend, backend, database, SQLite, localhost, WebSocket, Nick, Jayton, Dylan.';
     return new Promise((resolve) => {
-      const args = ['-m', model, '-f', wavPath, '-l', 'en', '-nt', '-np', '-t', '4'];
+      const args = ['-m', model, '-f', wavPath, '-l', 'en', '-nt', '-np', '-t', '4', '--prompt', vocab];
       const proc = spawn(cli, args, { shell: false, windowsHide: true });
       let out = '';
       let errOut = '';

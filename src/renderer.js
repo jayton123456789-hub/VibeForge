@@ -1097,6 +1097,7 @@ async function renderLiveRoom(session) {
   let liveTranscript = '';
   // Live caption state (real local Whisper, chunked)
   let captionNode = null;
+  let captionMute = null;
   let captionTimer = null;
   let captionBusy = false;
   let captionBuf = [];
@@ -1357,7 +1358,7 @@ async function renderLiveRoom(session) {
         mediaRecorder.onstop = () => {
           try { combined.getTracks().forEach(t => t.stop()); } catch(e){}
         };
-        mediaRecorder.start();
+        mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
         showToast('Now capturing: ' + captureLabel);
       }
     } catch (e) {
@@ -1395,7 +1396,7 @@ async function renderLiveRoom(session) {
         mediaRecorder = new MediaRecorder(combined);
         mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
         mediaRecorder.onstop = () => { try { combined.getTracks().forEach(t => t.stop()); } catch(e){} };
-        mediaRecorder.start();
+        mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
       }
     } catch (e) {
       showToast('Window pick: ' + (e.message || 'cancelled'));
@@ -1407,6 +1408,7 @@ async function renderLiveRoom(session) {
     _globalTimerInterval = null;
     if (captionTimer) { try { clearInterval(captionTimer); } catch(e){} captionTimer = null; }
     if (captionNode) { try { captionNode.disconnect(); } catch(e){} captionNode = null; }
+    if (captionMute) { try { captionMute.disconnect(); } catch(e){} captionMute = null; }
     if (isRecording && mediaRecorder) {
       try {
         if (mediaRecorder.state !== 'inactive') {
@@ -1545,7 +1547,16 @@ async function renderLiveRoom(session) {
     const ctx = canvas ? canvas.getContext('2d') : null;
 
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Clean, reliable capture. echoCancellation also stops any speaker bleed from
+      // becoming a feedback loop; noiseSuppression + autoGainControl keep speech legible.
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
       let recStream = micStream;
 
       // if a screen was picked *before* we got here, combine now
@@ -1569,7 +1580,7 @@ async function renderLiveRoom(session) {
         try { recStream.getTracks().forEach(t => t.stop()); } catch(e){}
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
       isRecording = true;
       if (micStatus) micStatus.textContent = 'Recording... (screen/mic)';
 
@@ -1620,8 +1631,15 @@ async function renderLiveRoom(session) {
               captionBufLen -= captionBuf.shift().length;
             }
           };
+          // CRITICAL: a ScriptProcessor only fires onaudioprocess while it reaches the
+          // destination — but connecting the mic to the speakers creates a feedback
+          // squeal that the mic re-records. Route it through a zero-gain node so the
+          // graph is pulled but absolutely nothing is audible. Never connect mic->dest.
+          captionMute = audioContext.createGain();
+          captionMute.gain.value = 0;
           source.connect(captionNode);
-          captionNode.connect(audioContext.destination);
+          captionNode.connect(captionMute);
+          captionMute.connect(audioContext.destination);
 
           tEl.innerHTML = '<span class="text-zinc-500 text-xs">Listening... captions appear a few seconds behind speech.</span>';
           let firstCaption = true;
