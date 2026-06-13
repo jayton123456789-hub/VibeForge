@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs & temp
+*.log
+*.tmp
+
+# Local tool settings
+.claude/settings.local.json
+
+# OS junk
+Thumbs.db
+Desktop.ini

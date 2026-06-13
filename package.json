@@ -1,0 +1,46 @@
+{
+  "name": "vibeforge",
+  "version": "0.2.0",
+  "description": "Local AI Creative Session Studio - minimal working version",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "rebuild": "npx @electron/rebuild -f -w better-sqlite3 --electron-version 30.5.1",
+    "postinstall": "npm run rebuild",
+    "build": "electron-builder --win",
+    "dist": "electron-builder --win portable",
+    "nuke:data": "node -e \"const p=require('path').join(process.env.APPDATA,'VibeForge'); const fs=require('fs'); if(fs.existsSync(p)){fs.rmSync(p,{recursive:true,force:true});console.log('Nuked:',p);}else{console.log('No data dir at',p);}\" ",
+    "verify:clean": "node -e \"const fs=require('fs'); const Database=require('better-sqlite3'); const p=require('path').join(process.env.APPDATA,'VibeForge','data','vibeforge.db'); const db=fs.existsSync(p)?new Database(p):null; const c=t=>db?db.prepare('SELECT COUNT(*) as c FROM '+t).get().c:0; console.log('projects:',c('projects'),'sessions:',c('sessions'),'decisions:',c('decisions'),'tasks:',c('tasks'),'ideas:',c('ideas')); if(db)db.close();\" "
+  },
+  "keywords": [],
+  "author": "VibeForge",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "uuid": "^9.0.1",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "electron": "^30.5.1",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.vibeforge.app",
+    "productName": "VibeForge",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/LOGO.png"
+    },
+    "portable": {
+      "artifactName": "VibeForge-Portable.exe"
+    }
+  }
+}

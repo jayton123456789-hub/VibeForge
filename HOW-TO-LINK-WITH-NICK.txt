@@ -1,0 +1,42 @@
+HOW TO LINK YOUR PC WITH NICK'S (Duo / Share over local network)
+
+REQUIREMENTS:
+- Both machines on the SAME Wi-Fi or wired LAN (same subnet).
+- Both running the exact same VibeForge build (portable exe or after npm install).
+- Windows Firewall may prompt - allow the app for Private networks.
+
+STEPS:
+
+1. Jayton (host):
+   - Open VibeForge
+   - Go to sidebar: Share
+   - Click "Host"
+   - Copy the shown address (e.g. 192.168.1.42:48291)
+   - Tell Nick the address (text, Discord, whatever)
+
+2. Nick (join):
+   - Open VibeForge
+   - Go to sidebar: Share
+   - Paste the address into the Join box
+   - Click "Join"
+   - You should see "Connected" status on both sides.
+
+3. What success looks like:
+   - Both see "Connected to <ip:port>"
+   - You can now use the link for future features (notes sync, file send, etc.).
+   - For now: the link is established, status is live.
+
+TROUBLESHOOTING:
+- Bad address error: double-check IP and port, make sure host is still running.
+- Connection refused / timeout: Firewall on host - allow Node/Electron or the exe through Private firewall. Temporarily disable for test.
+- Different subnets: won't work. Use same WiFi.
+- One is on VPN/mobile hotspot: disable.
+- Still fails: both run "npm run nuke:data", restart, try again with fresh projects.
+
+Once linked, you can start a "Duo / Link Mode" session. The host side will show the connection status during the session.
+
+This is real local WebSocket - no cloud, no accounts.
+
+For file transfer / live notes / audio sync: those are the next vertical slices after the foundation (reset + clean launch + all current buttons) is solid.
+
+Both of you should be able to run a clean portable build with zero fake DoReMii data after following README-FIRST.txt.
