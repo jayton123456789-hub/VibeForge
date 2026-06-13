@@ -3005,6 +3005,171 @@ async function resolveOllamaModel() {
   return { ok: true, model: chosen };
 }
 
+// ============================================================================
+// The "Brain": a single tool-calling pass over a finished session.
+// The model reads the meeting (notes + transcript + marks) and decides, on its
+// own, what becomes a task, a decision to settle, or an idea to store — then
+// calls tools that write straight into VibeForge's menus. This is the model
+// acting as part of the app instead of a thing we call and parse.
+// Requires a tools-capable Ollama model (llama3.1, llama3.2, qwen2.5, etc.).
+// ============================================================================
+
+const BRAIN_SYSTEM_PROMPT = `You are the resident intelligence inside VibeForge, a local studio where people (Jayton, Nick, Dylan and friends) think out loud, record sessions, and build products through conversation.
+
+A session just ended. You are given its title, notes, and live transcript. Your job is to read everything and FILE IT into the right places in the app by calling tools. You are not writing an essay — you are organizing a workspace.
+
+The places things go:
+- TASK — a concrete action someone needs to do later ("email the designer", "rebuild the native module"). Use add_task.
+- DECISION — a choice the group is weighing or settled. This includes debated topics where people disagreed. Capture the options and who argued what, and mark it "open" if it still needs to be settled or "decided" if they landed on an answer. Use add_decision. This is for the things they'll want to come back and vote/settle on.
+- IDEA — a spark, a "wouldn't it be cool if", a tangent. ESPECIALLY capture ideas that are unrelated to the main topic — those are the easiest to lose and the most worth keeping. Give each idea a short topic label so related ideas from different sessions can be grouped together over time. Use add_idea.
+- SUMMARY + NAME — call set_session_summary exactly once with a tight 3-6 word name and a 2-4 sentence summary.
+
+Rules:
+- Always call set_session_summary once.
+- Only create tasks/decisions/ideas that are actually supported by the content. Do not invent filler. A short session might produce just a summary and one idea — that's fine.
+- Prefer a few high-quality items over many vague ones. Cap yourself at ~6 tasks, ~5 decisions, ~6 ideas.
+- A disagreement or open question is a DECISION (status "open"), not a task.
+- When you are done filing everything, stop calling tools and reply with a one-line confirmation.`;
+
+function brainTools() {
+  return [
+    { type: 'function', function: {
+      name: 'set_session_summary',
+      description: 'Set the session name and summary. Call exactly once.',
+      parameters: { type: 'object', properties: {
+        short_name: { type: 'string', description: '3-6 word title for the session' },
+        summary: { type: 'string', description: '2-4 sentence summary of what happened and what matters' }
+      }, required: ['short_name', 'summary'] }
+    }},
+    { type: 'function', function: {
+      name: 'add_task',
+      description: 'Record a concrete action item that someone needs to do.',
+      parameters: { type: 'object', properties: {
+        title: { type: 'string' },
+        priority: { type: 'string', enum: ['low', 'medium', 'high'] }
+      }, required: ['title'] }
+    }},
+    { type: 'function', function: {
+      name: 'add_decision',
+      description: 'Record a choice the group is weighing or has settled, including debated topics. Capture the options and who argued what.',
+      parameters: { type: 'object', properties: {
+        title: { type: 'string', description: 'the question/choice, e.g. "WebSockets vs polling for sync?"' },
+        options: { type: 'array', items: { type: 'string' }, description: 'the choices to weigh, e.g. ["WebSockets","Polling"] or ["Yes","No"]' },
+        positions: { type: 'string', description: 'who argued what, e.g. "Nick: WebSockets for speed. Jayton: worried about firewall."' },
+        status: { type: 'string', enum: ['open', 'decided'], description: 'open = still needs settling, decided = resolved' },
+        resolution: { type: 'string', description: 'if decided, the chosen option' }
+      }, required: ['title'] }
+    }},
+    { type: 'function', function: {
+      name: 'add_idea',
+      description: 'Capture an idea, spark, or tangent — especially one not central to the main topic. Stored long-term and grouped with related ideas across sessions.',
+      parameters: { type: 'object', properties: {
+        title: { type: 'string' },
+        description: { type: 'string' },
+        topic: { type: 'string', description: 'short 2-4 word topic label for grouping, e.g. "offline sync", "onboarding UX"' }
+      }, required: ['title'] }
+    }}
+  ];
+}
+
+// Execute one tool call against the app. Returns a short result string for the model.
+async function runBrainTool(name, args, sessionId, tally) {
+  args = args || {};
+  const pid = currentProject.id;
+  try {
+    if (name === 'set_session_summary') {
+      if (args.short_name) {
+        await window.vibeforge.updateSessionTitle(sessionId, String(args.short_name).slice(0, 80));
+        tally.named = args.short_name;
+      }
+      if (args.summary) {
+        const s = (await window.vibeforge.getSessions(pid)).find(x => x.id === sessionId);
+        await window.vibeforge.updateSessionNotes(sessionId, (s && s.notes ? s.notes : '') + '\n\n[AI Summary]\n' + args.summary);
+        tally.summary = true;
+      }
+      return 'summary and name saved';
+    }
+    if (name === 'add_task') {
+      await window.vibeforge.addTask({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), priority: args.priority || 'medium' });
+      tally.tasks++;
+      return 'task added';
+    }
+    if (name === 'add_decision') {
+      const opts = Array.isArray(args.options) ? args.options : [];
+      let notes = '';
+      if (opts.length) notes += 'Options: ' + opts.join(' | ') + '\n';
+      if (args.positions) notes += args.positions + '\n';
+      if (args.resolution) notes += 'Resolution: ' + args.resolution + '\n';
+      const status = args.status === 'decided' ? 'approved' : 'proposed';
+      await window.vibeforge.addDecision({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), notes: notes.trim(), status });
+      tally.decisions++;
+      return 'decision added';
+    }
+    if (name === 'add_idea') {
+      const tags = args.topic ? [String(args.topic).toLowerCase().slice(0, 40)] : [];
+      const created = await window.vibeforge.addIdea({ projectId: pid, sessionId, title: String(args.title).slice(0, 200), description: args.description || '', tags });
+      if (created && created.id) await window.vibeforge.updateIdea({ id: created.id, status: 'Inbox' });
+      tally.ideas++;
+      return 'idea added' + (args.topic ? ' under topic "' + args.topic + '"' : '');
+    }
+  } catch (e) {
+    return 'error: ' + e.message;
+  }
+  return 'unknown tool';
+}
+
+// Returns { ok, tally } or throws on hard failure. opts.onStep(msg) for progress.
+async function runSessionBrain(sessionId, opts = {}) {
+  const resolved = await resolveOllamaModel();
+  if (!resolved.ok) { const e = new Error(resolved.reason === 'offline' ? 'Ollama offline' : 'No model pulled'); e.reason = resolved.reason; throw e; }
+  const settings = await window.vibeforge.getSettings();
+  const ollamaUrl = settings.ollama_url || 'http://127.0.0.1:11434';
+  const model = resolved.model;
+
+  const sessions = await window.vibeforge.getSessions(currentProject.id);
+  const s = sessions.find(x => x.id === sessionId);
+  if (!s) throw new Error('Session not found');
+
+  const context = `Session title: ${s.title}\nMode: ${s.mode}\n\n--- NOTES & TRANSCRIPT ---\n${s.notes || '(no notes captured)'}\n--- END ---\n\nFile everything into the app now using your tools.`;
+
+  const messages = [
+    { role: 'system', content: BRAIN_SYSTEM_PROMPT },
+    { role: 'user', content: context }
+  ];
+  const tools = brainTools();
+  const tally = { tasks: 0, decisions: 0, ideas: 0, summary: false, named: null };
+
+  // Agentic loop, bounded for a local model.
+  for (let round = 0; round < 5; round++) {
+    const res = await fetch(`${ollamaUrl}/api/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages, tools, stream: false })
+    });
+    if (!res.ok) {
+      // Model likely doesn't support tools — signal caller to fall back.
+      const err = new Error(`Ollama /api/chat HTTP ${res.status}`);
+      err.noTools = res.status === 400 || res.status === 404;
+      throw err;
+    }
+    const data = await res.json();
+    const msg = data.message || {};
+    messages.push(msg);
+    const calls = msg.tool_calls || [];
+    if (!calls.length) break; // model is done
+
+    for (const call of calls) {
+      const fn = call.function || {};
+      let args = fn.arguments;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = {}; } }
+      const result = await runBrainTool(fn.name, args, sessionId, tally);
+      if (opts.onStep) opts.onStep(`${fn.name}: ${result}`);
+      messages.push({ role: 'tool', content: result });
+    }
+  }
+
+  return { ok: true, tally };
+}
+
 async function generateFromSession(sessionId, type, btn) {
   const settings = await window.vibeforge.getSettings();
   const ollamaUrl = settings.ollama_url || 'http://127.0.0.1:11434';
@@ -3213,28 +3378,45 @@ async function autoProcessSessionAfterStop(sessionId) {
     updateProcessingStep('transcript', 'skip', 'Transcript skipped: ' + (e.message || e), '50%');
   }
 
-  updateProcessingStep('summary', 'active', 'Checking Ollama and creating a smart title + summary...', '65%');
+  updateProcessingStep('summary', 'active', 'Local AI is reading the session and filing it into your menus...', '65%');
   const resolved = await resolveOllamaModel();
   if (!resolved.ok) {
     const why = resolved.reason === 'offline'
       ? 'Ollama is offline. Everything is saved — run AI Cleanup later, or start Ollama in Settings → AI Tools.'
       : 'No Ollama model is pulled yet. Everything is saved — pull a model in Settings → AI Tools, then run AI Cleanup.';
     updateProcessingStep('summary', 'skip', why, '85%');
-    updateProcessingStep('items', 'skip', 'Tasks & decisions need a local model — skipped for now.', '100%');
+    updateProcessingStep('items', 'skip', 'Tasks, decisions & ideas need a local model — skipped for now.', '100%');
     await new Promise(r => setTimeout(r, 1200));
     return;
   }
   try {
-    await generateFromSession(sessionId, 'summary', null);
-    updateProcessingStep('summary', 'done', 'Summary saved. Extracting tasks and decisions...', '80%');
-    updateProcessingStep('items', 'active', 'Extracting tasks and decisions...', '88%');
-    await generateFromSession(sessionId, 'tasks', null);
-    await generateFromSession(sessionId, 'decisions', null);
-    updateProcessingStep('items', 'done', 'AI cleanup complete. Opening review...', '100%');
-    await new Promise(r => setTimeout(r, 600));
+    // The brain: one tool-calling pass that routes content into tasks/decisions/ideas itself.
+    const r = await runSessionBrain(sessionId, {
+      onStep: (m) => updateProcessingStep('items', 'active', m, '88%')
+    });
+    const t = r.tally;
+    updateProcessingStep('summary', 'done', t.named ? `Named "${t.named}" and summarized.` : 'Summary saved.', '80%');
+    updateProcessingStep('items', 'done', `Filed ${t.tasks} task(s), ${t.decisions} decision(s), ${t.ideas} idea(s).`, '100%');
+    await new Promise(r => setTimeout(r, 700));
   } catch (e) {
-    updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e.message || e), '100%');
-    await new Promise(r => setTimeout(r, 900));
+    if (e.noTools) {
+      // Model doesn't support tool calling — fall back to the older extract-and-parse path.
+      updateProcessingStep('items', 'active', 'Model lacks tool support — using basic extraction...', '88%');
+      try {
+        await generateFromSession(sessionId, 'summary', null);
+        await generateFromSession(sessionId, 'tasks', null);
+        await generateFromSession(sessionId, 'decisions', null);
+        updateProcessingStep('summary', 'done', 'Summary saved.', '90%');
+        updateProcessingStep('items', 'done', 'Tasks and decisions extracted.', '100%');
+        await new Promise(r => setTimeout(r, 600));
+      } catch (e2) {
+        updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e2.message || e2), '100%');
+        await new Promise(r => setTimeout(r, 900));
+      }
+    } else {
+      updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e.message || e), '100%');
+      await new Promise(r => setTimeout(r, 900));
+    }
   }
 }
 
