@@ -38,6 +38,15 @@ function getProfileNameFallback() {
   return n === 'No project' ? 'Linked collaborator' : n;
 }
 
+async function isLinkConnected() {
+  try {
+    const st = await getDuoStatus();
+    return !!(st && st.status === 'connected');
+  } catch (e) {
+    return !!(peerStatus && peerStatus.status === 'connected');
+  }
+}
+
 // Init
 async function init() {
   // Load projects
@@ -118,7 +127,9 @@ async function ensureDefaultProject() {
 function maybeShowFirstRunTour(force = false) {
   if (!force && localStorage.getItem('vibeforge-tour-seen') === 'true') return;
   const steps = [
-    { target: '.fa-microphone', title: 'Quick Record', body: 'This is the main flow: tap the mic, start talking, name it later. VibeForge saves the session and runs cleanup after you stop.' },
+    { target: '#quick-record-btn', title: 'Quick Record', body: 'This is the main flow: tap the mic, start talking, name it later. If you are linked with someone, this automatically sends them a Join Session popup.' },
+    { target: '#top-new-session-btn', title: 'Advanced Session', body: 'Use this when you want to choose Room, Duo/Link, or Manual. If Link is already connected, Room starts as a synced Duo session automatically.' },
+    { target: '#top-capture-idea-btn', title: 'Capture Idea', body: 'Grab a thought without starting a full recording. You can smart-name it later with local AI.' },
     { target: '#global-search', title: 'Global Search', body: 'Search across sessions, notes, decisions, tasks, and ideas. Press Enter to jump into Project Memory.' },
     { target: '#nav-sessions', title: 'Sessions', body: 'Your recordings live here. Open old sessions, resume them, review transcripts, highlights, and AI summaries.' },
     { target: '#nav-decisions', title: 'Decision Vault', body: 'Choices and open questions get filed here so they do not disappear inside a long conversation.' },
@@ -134,9 +145,9 @@ function maybeShowFirstRunTour(force = false) {
   overlay.id = 'spotlight-tour';
   overlay.className = 'fixed inset-0 z-[700] pointer-events-none';
   overlay.innerHTML = `
-    <div class="absolute inset-0 bg-black/70"></div>
-    <div id="tour-ring" class="absolute rounded-[22px] border-2 border-cyan-300 shadow-[0_0_0_9999px_rgba(0,0,0,.68),0_0_36px_rgba(34,211,238,.75)] transition-all duration-200"></div>
-    <div id="tour-card" class="absolute w-[360px] max-w-[calc(100vw-32px)] rounded-[26px] border border-cyan-500/30 bg-[#0b0f1d] p-5 shadow-2xl shadow-black/70 pointer-events-auto">
+    <div class="absolute inset-0 bg-black/35 backdrop-blur-[1px]"></div>
+    <div id="tour-ring" class="absolute rounded-[22px] border-2 border-cyan-300 shadow-[0_0_0_9999px_rgba(0,0,0,.34),0_0_30px_rgba(34,211,238,.65)] transition-all duration-200"></div>
+    <div id="tour-card" class="absolute w-[360px] max-w-[calc(100vw-32px)] rounded-[26px] border border-cyan-500/35 bg-[#0b0f1d]/95 p-5 shadow-2xl shadow-black/60 pointer-events-auto">
       <div class="text-[10px] uppercase tracking-[2px] text-cyan-300 mb-2">Guided tour <span id="tour-count"></span></div>
       <div id="tour-title" class="text-xl font-semibold"></div>
       <div id="tour-body" class="mt-2 text-sm leading-6 text-zinc-400"></div>
@@ -149,10 +160,13 @@ function maybeShowFirstRunTour(force = false) {
   `;
   document.body.appendChild(overlay);
 
-  const close = async (startRecording = false) => {
+  const close = async (askToRecord = false) => {
     localStorage.setItem('vibeforge-tour-seen', 'true');
     overlay.remove();
-    if (startRecording) await quickStartRecording();
+    if (askToRecord) {
+      const yes = await window.showConfirm('Tour finished. Start a quick recording now?', { okLabel: 'Start recording', danger: false });
+      if (yes) await quickStartRecording();
+    }
   };
   const render = () => {
     const step = steps[index];
@@ -181,7 +195,7 @@ function maybeShowFirstRunTour(force = false) {
     document.getElementById('tour-body').textContent = step.body;
     document.getElementById('tour-back').disabled = index === 0;
     document.getElementById('tour-back').style.opacity = index === 0 ? '.45' : '1';
-    document.getElementById('tour-next').textContent = index === steps.length - 1 ? 'Start Recording' : 'Next';
+    document.getElementById('tour-next').textContent = index === steps.length - 1 ? 'Finish' : 'Next';
     try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) {}
   };
   overlay.querySelector('#tour-skip').onclick = () => close(false);
@@ -524,6 +538,7 @@ async function deleteSession(id, btn) {
 window.quickStartRecording = async function() {
   try {
     await ensureDefaultProject();
+    const linked = await isLinkConnected();
     const stamp = new Date().toLocaleString([], {
       month: 'short',
       day: 'numeric',
@@ -533,9 +548,14 @@ window.quickStartRecording = async function() {
     const session = await window.vibeforge.createSession({
       projectId: currentProject.id,
       title: `Quick Record ${stamp}`,
-      mode: 'room'
+      mode: linked ? 'duo' : 'room'
     });
-    showToast('Quick recording started. Name it later.');
+    if (linked) {
+      await sendLinkedSessionInvite(session);
+      showToast('Linked quick recording started - join popup sent.');
+    } else {
+      showToast('Quick recording started. Name it later.');
+    }
     await renderLiveRoom(session);
   } catch (e) {
     showToast('Could not start quick recording: ' + (e.message || e));
@@ -963,6 +983,10 @@ window.startNewSession = async function() {
   }
   document.getElementById('new-session-modal').classList.remove('hidden');
   document.getElementById('new-session-modal').classList.add('flex');
+  if (await isLinkConnected()) {
+    const duoRadio = document.querySelector('input[name="mode"][value="duo"]');
+    if (duoRadio) duoRadio.checked = true;
+  }
   const nameEl = document.getElementById('session-name');
   if (nameEl) nameEl.focus();
 };
@@ -1189,7 +1213,9 @@ window.confirmNewSession = async function() {
   try {
     const rawName = document.getElementById('session-name').value.trim();
     const modeRadio = document.querySelector('input[name="mode"]:checked');
-    const mode = modeRadio ? modeRadio.value : 'room';
+    let mode = modeRadio ? modeRadio.value : 'room';
+    const linked = await isLinkConnected();
+    if (linked && mode === 'room') mode = 'duo';
     const fallbackName = `Session ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
     const name = rawName || fallbackName;
     if (!currentProject || !currentProject.id) {
@@ -1202,7 +1228,11 @@ window.confirmNewSession = async function() {
 
     hideNewSessionModal();
 
-    if (mode === 'duo') {
+    if (mode === 'duo' && linked) {
+      await sendLinkedSessionInvite(session);
+      showToast('Linked session invite sent. Starting your side.');
+      await renderLiveRoom(session);
+    } else if (mode === 'duo') {
       await renderDuoSetup(session);
     } else {
       // Room or manual - use live view
@@ -2103,7 +2133,7 @@ async function renderShareView(content, actionsEl) {
         </section>
 
         <aside class="space-y-4">
-          <div class="rounded-[24px] border border-cyan-500/25 bg-cyan-500/10 p-5"><div class="font-semibold text-white">One-PC two-person test</div><div class="mt-2 text-sm text-zinc-400">Opens another VibeForge window with its own PeerJS context. Treat it like Nick/Dylan.</div><button onclick="openDuoTestWindow()" class="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-zinc-200">Open Tester Window</button><div class="mt-4 space-y-2 text-xs text-zinc-400"><div><span class="text-cyan-300">1.</span> Main: Host / Generate Code.</div><div><span class="text-cyan-300">2.</span> Tester: paste code and Join.</div><div><span class="text-cyan-300">3.</span> Use shared controls above.</div></div></div>
+          <div class="rounded-[24px] border border-cyan-500/25 bg-cyan-500/10 p-5"><div class="flex items-center justify-between gap-2"><div class="font-semibold text-white">One-PC two-person test</div><span class="rounded-full border border-amber-500/40 px-2 py-1 text-[10px] uppercase tracking-wide text-amber-200">Dev only</span></div><div class="mt-2 text-sm text-zinc-400">Opens another VibeForge window with its own PeerJS context. This simulates Nick/Dylan while building; hide this before v1.0.0.</div><button onclick="openDuoTestWindow()" class="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-zinc-200">Open Tester Window</button><div class="mt-4 space-y-2 text-xs text-zinc-400"><div><span class="text-cyan-300">1.</span> Main: Host / Generate Code.</div><div><span class="text-cyan-300">2.</span> Tester: paste code and Join.</div><div><span class="text-cyan-300">3.</span> Use shared controls above.</div></div></div>
           <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5"><div class="flex items-center justify-between gap-3"><div class="font-semibold text-white">Received</div><button onclick="revealReceivedFolder()" class="rounded-xl border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Open Folder</button></div><div class="mt-3 space-y-2">${receivedHtml}</div></div>
         </aside>
       </div>
