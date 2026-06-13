@@ -44,6 +44,15 @@
         </div>
         <div class="text-[10px] px-3 py-1 rounded-full border border-cyan-500/40 text-cyan-300 bg-cyan-500/10">LOCAL</div>
       </div>
+      <!-- Live service status (green lights). Click to jump to AI Tools. -->
+      <div id="service-status" class="no-drag flex items-center gap-2">
+        <button onclick="switchView('settings'); setTimeout(()=>window.switchSettingsTab&&window.switchSettingsTab('ai'),60)" title="Ollama (local AI) status" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[#0d101d]/80 border border-zinc-700/70 hover:border-zinc-500 text-[11px] text-zinc-300">
+          <span id="dot-ollama" class="w-2 h-2 rounded-full bg-zinc-600"></span>Ollama
+        </button>
+        <button onclick="switchView('settings'); setTimeout(()=>window.switchSettingsTab&&window.switchSettingsTab('ai'),60)" title="Whisper (transcription) status" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[#0d101d]/80 border border-zinc-700/70 hover:border-zinc-500 text-[11px] text-zinc-300">
+          <span id="dot-whisper" class="w-2 h-2 rounded-full bg-zinc-600"></span>Whisper
+        </button>
+      </div>
       <div class="no-drag flex-1 max-w-2xl mx-auto relative">
         <i class="fa-solid fa-search absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500"></i>
         <input id="global-search" type="text" onkeydown="if(event.key==='Enter') doMemorySearchFromBar()" placeholder="Search sessions, notes, decisions...    Ctrl + K"

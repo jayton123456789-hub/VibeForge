@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, desktopCapturer, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { exec, spawn } = require('child_process');
@@ -248,6 +248,21 @@ function setSetting(key, value) {
 
 // IPC for all real actions - every button will call these
 function registerIpc() {
+  ipcMain.handle('get-screen-sources', async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 360, height: 220 },
+      fetchWindowIcons: true
+    });
+    return sources.map(s => ({
+      id: s.id,
+      name: s.name,
+      display_id: s.display_id,
+      thumbnail: s.thumbnail ? s.thumbnail.toDataURL() : null,
+      appIcon: s.appIcon ? s.appIcon.toDataURL() : null
+    }));
+  });
+
   // Projects
   ipcMain.handle('get-projects', () => {
     return db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
@@ -951,16 +966,47 @@ function registerIpc() {
     return 'gh';
   }
 
-  function getOllamaCommand() {
+  // Raw executable path (no quotes) — for spawn() with an args array.
+  function getOllamaExe() {
     const fullPaths = [
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
       'C:\\Program Files\\Ollama\\ollama.exe'
     ];
     for (const p of fullPaths) {
-      if (fs.existsSync(p)) return `"${p}"`;
+      if (fs.existsSync(p)) return p;
     }
-    return 'ollama';
+    return 'ollama'; // rely on PATH
   }
+
+  // Quoted command string — for exec()/shell string contexts.
+  function getOllamaCommand() {
+    const exe = getOllamaExe();
+    return exe.includes(' ') ? `"${exe}"` : exe;
+  }
+
+  // One-call status for the UI green-lights: is Ollama up, and which models are pulled.
+  ipcMain.handle('ollama-status', async () => {
+    const url = getSetting('ollama_url') || 'http://127.0.0.1:11434';
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const res = await fetch(`${url}/api/tags`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return { running: false, models: [] };
+      const data = await res.json();
+      const models = (data.models || []).map(m => m.name).filter(Boolean);
+      return { running: true, models, model: getSetting('ollama_model') || '' };
+    } catch (e) {
+      return { running: false, models: [], error: e.message };
+    }
+  });
+
+  // Whisper status for the green-lights (engine + model both present)
+  ipcMain.handle('whisper-status', () => {
+    const cli = findWhisperCli();
+    const model = getWhisperModelPath();
+    return { ready: !!(cli && fs.existsSync(model)) };
+  });
 
   
 
@@ -992,15 +1038,38 @@ function registerIpc() {
     });
   });
   // === Ollama serve (open source local AI server) ===
-  ipcMain.handle('start-ollama-serve', () => {
-    const cmd = getOllamaCommand();
+  ipcMain.handle('start-ollama-serve', async () => {
+    // If it's already answering, don't spawn a second one.
+    const url = getSetting('ollama_url') || 'http://127.0.0.1:11434';
     try {
-      const proc = spawn(cmd, ['serve'], { detached: true, stdio: 'ignore' });
-      proc.unref();
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
+      const r = await fetch(`${url}/api/tags`).catch(() => null);
+      if (r && r.ok) return { ok: true, alreadyRunning: true };
+    } catch (e) {}
+
+    const exe = getOllamaExe();
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      try {
+        // Raw path + args array + the error handler is what was missing before:
+        // spawn() emits ENOENT asynchronously, so without an 'error' listener it
+        // surfaced as an uncaught exception in the main process.
+        const proc = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+        proc.on('error', (err) => {
+          done({ ok: false, error: err.code === 'ENOENT'
+            ? 'Ollama is not installed (or not found). Use "Download Ollama" first.'
+            : err.message });
+        });
+        proc.unref();
+        // Give it a moment, then verify it actually came up.
+        setTimeout(async () => {
+          const r = await fetch(`${url}/api/tags`).catch(() => null);
+          done({ ok: !!(r && r.ok), started: true });
+        }, 1500);
+      } catch (err) {
+        done({ ok: false, error: err.message });
+      }
+    });
   });
 
   ipcMain.handle('open-ollama', () => {
@@ -1407,6 +1476,20 @@ function createWindow() {
     icon: path.join(__dirname, 'assets/LOGO.png'),
     show: false
   });
+
+  try {
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      desktopCapturer.getSources({ types: ['screen', 'window'] })
+        .then((sources) => {
+          const requestedVideo = sources[0];
+          if (!requestedVideo) return callback({});
+          callback({ video: requestedVideo, audio: 'loopback' });
+        })
+        .catch(() => callback({}));
+    }, { useSystemPicker: true });
+  } catch (e) {
+    console.warn('Display media handler unavailable:', e.message);
+  }
 
   mainWindow.loadFile(path.join(__dirname, 'src/index.html'));
 

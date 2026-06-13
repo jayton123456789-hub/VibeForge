@@ -17,6 +17,8 @@ let currentView = 'sessions';
 let projects = [];
 let peerStatus = { status: 'offline', address: '' };
 let receivedItems = [];
+// Global timer ref so repeated quickStartRecording never stacks intervals
+let _globalTimerInterval = null;
 
 // Init
 async function init() {
@@ -33,7 +35,8 @@ async function init() {
   currentProject = projects[0];
   updateProjectHeader(currentProject);
   await switchView('sessions');
-  setTimeout(() => maybeShowFirstRunTour(), 250);
+  // Keep the tour available from the sidebar, but do not auto-block the app with
+  // a full-screen overlay on launch. The previous auto-open made the UI feel unclickable.
 
   // Listen for peer updates (from main)
   if (window.vibeforge.onPeerStatus) {
@@ -162,21 +165,26 @@ function formatSessionMeta(s) {
   if (s.ended_at) {
     const end = new Date(s.ended_at);
     const mins = Math.max(1, Math.round((s.ended_at - s.started_at) / 60000));
-    str += ` → ${end.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} (${mins}m)`;
+    str += ` -> ${end.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} (${mins}m)`;
   } else {
     str += ' (open)';
   }
-  if (s.mode) str += ` • ${s.mode}`;
+  if (s.mode) str += ` - ${s.mode}`;
   return str;
 }
 
 async function showProjectMenu() {
+  // Toggle: close if already open
+  const existing = document.getElementById('project-dropdown');
+  if (existing) { existing.remove(); return; }
+
   if (!currentProject && projects.length === 0) {
     await createFirstProject();
     return;
   }
 
   const menu = document.createElement('div');
+  menu.id = 'project-dropdown';
   menu.className = 'absolute bg-[#111113] border border-zinc-700 rounded-2xl shadow-xl py-1 text-sm z-50 min-w-[220px]';
   menu.style.left = '12px';
   menu.style.top = '60px';
@@ -203,15 +211,14 @@ async function showProjectMenu() {
   menu.innerHTML = html;
   document.body.appendChild(menu);
 
-  // Close on outside click
-  setTimeout(() => {
-    document.addEventListener('click', function handler(ev) {
-      if (!menu.contains(ev.target)) {
-        menu.remove();
-        document.removeEventListener('click', handler);
-      }
-    }, { once: true });
-  }, 10);
+  // Close on outside click (use capture phase, small delay to skip the opening click)
+  const handler = (ev) => {
+    if (!menu.contains(ev.target) && ev.target.id !== 'project-header' && !document.getElementById('project-header')?.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener('click', handler, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', handler, true), 150);
 }
 
 async function createFirstProject() {
@@ -364,24 +371,32 @@ async function renderSessionsView(content, actionsEl) {
         <div class="border-t border-zinc-800 p-5">
           <div class="flex items-center justify-between mb-3">
             <div>
-              <div class="font-semibold text-lg">Recent sessions</div>
-              <div class="text-xs text-zinc-500">${sessions.length} total in ${esc(currentProject.name)}</div>
+              <div class="font-semibold text-lg">All sessions</div>
+              <div class="text-xs text-zinc-500">${sessions.length} total - ${sessions.filter(s=>s.ended_at).reduce((sum,s)=>sum+Math.round((s.ended_at-s.started_at)/60000),0)} min recorded in ${esc(currentProject.name)}</div>
             </div>
-            <button onclick="startNewSession()" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">New</button>
+            <button onclick="startNewSession()" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">+ New</button>
           </div>
-          ${recent.length ? `
-            <div class="grid md:grid-cols-2 gap-3">
-              ${recent.map(s => `
-                <div onclick="openSession('${s.id}')" class="card cursor-pointer rounded-2xl border border-zinc-800 bg-black/25 p-4">
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="font-medium truncate">${esc(s.title)}</div>
-                      <div class="text-xs text-zinc-500 mt-1">${formatSessionMeta(s)}</div>
-                    </div>
+          ${sessions.length ? `
+            <div class="space-y-2">
+              ${sessions.map(s => {
+                const mins = s.ended_at ? Math.max(1, Math.round((s.ended_at - s.started_at) / 60000)) : null;
+                const date = new Date(s.started_at).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'});
+                const time = new Date(s.started_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+                return `
+                <div onclick="openSession('${s.id}')" class="card cursor-pointer rounded-2xl border border-zinc-800 bg-black/25 px-4 py-3 flex items-center gap-3">
+                  <div class="w-9 h-9 rounded-xl bg-zinc-800 flex items-center justify-center flex-shrink-0 text-zinc-400">
+                    <i class="fa-solid fa-${s.audio_path ? 'microphone' : 'file-lines'} text-sm"></i>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="font-medium truncate text-sm">${esc(s.title)}</div>
+                    <div class="text-xs text-zinc-500 mt-0.5">${date} - ${time}${mins ? ' - ' + mins + 'm' : ' - open'}</div>
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    ${s.audio_path ? '<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">audio</span>' : ''}
                     <button onclick="event.stopImmediatePropagation(); resumeLiveSession('${s.id}')" class="px-3 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">Resume</button>
                   </div>
                 </div>
-              `).join('')}
+              `}).join('')}
             </div>
           ` : `
             <div class="rounded-2xl border border-dashed border-zinc-800 p-7 text-center text-zinc-500">No sessions yet. Hit the mic and start talking.</div>
@@ -412,155 +427,6 @@ async function renderSessionsView(content, actionsEl) {
       </aside>
     </div>
   `;
-
-  /*
-  // Premium recording workspace. This block was moved into renderLiveRoom below.
-  // while keeping the existing recording, transcription, and save logic below.
-  content.innerHTML = `
-    <div class="min-h-full grid 2xl:grid-cols-[1fr_310px] gap-4">
-      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-6 overflow-hidden">
-        <div class="grid lg:grid-cols-[1fr_390px] gap-5 items-start">
-          <div>
-            <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2"><i class="fa-solid fa-users mr-2"></i>${modeLabel}</div>
-            <div class="flex items-center gap-2 mb-3">
-              <h2 class="text-3xl font-semibold tracking-tight">${esc(session.title)}</h2>
-              <button onclick="editSessionTitle('${session.id}')" class="w-8 h-8 rounded-xl hover:bg-zinc-800 text-zinc-400"><i class="fa-solid fa-pen"></i></button>
-            </div>
-            <div class="flex items-center gap-4 text-sm mb-3">
-              <span class="text-red-400 font-semibold"><i class="fa-solid fa-circle fa-beat mr-2"></i>RECORDING</span>
-              <span class="text-zinc-400"><i class="fa-solid fa-microphone mr-2"></i><span id="capture-label">${captureLabel}</span></span>
-            </div>
-            <div id="live-timer" class="font-mono text-6xl text-red-400 tracking-tighter mb-2">00:00</div>
-            <div id="mic-status" class="hidden"></div>
-            <div class="h-7 overflow-hidden mb-5">
-              <div class="text-red-400/80 text-xs tracking-[3px] whitespace-nowrap opacity-80">••• ••••• •• ••••••• ••• •••• ••••• •• ••••••• ••• •••• ••••• •••</div>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-[160px_1fr] gap-4">
-            <button id="stop-btn" onclick="stopLiveRoom('${session.id}')"
-                    class="mx-auto w-40 h-40 rounded-full bg-red-500/10 border border-red-400/30 flex flex-col items-center justify-center glow-record text-red-100">
-              <span class="w-24 h-24 rounded-full bg-gradient-to-br from-red-300 to-red-600 flex items-center justify-center shadow-2xl shadow-red-500/30">
-                <i class="fa-solid fa-square text-3xl"></i>
-              </span>
-              <span class="mt-3 text-xs font-semibold text-red-300">Stop &amp; Save</span>
-            </button>
-
-            <div class="space-y-3">
-              <div class="grid grid-cols-2 gap-2">
-                <button onclick="pickScreenForLive()" class="rounded-2xl border border-red-400/40 bg-red-500/10 p-4 text-center text-sm text-red-100">
-                  <i class="fa-solid fa-desktop text-xl mb-2"></i><br>Screen
-                </button>
-                <button onclick="pickScreenForLive()" class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4 text-center text-sm text-zinc-300">
-                  <i class="fa-regular fa-window-maximize text-xl mb-2"></i><br>Window
-                </button>
-              </div>
-              <div class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4">
-                <div class="flex justify-between text-sm mb-2">
-                  <span class="text-zinc-300"><i class="fa-solid fa-microphone mr-2"></i>Mic input</span>
-                  <span id="mic-status-text" class="text-emerald-300">Good</span>
-                </div>
-                <canvas id="mic-meter" width="260" height="24" class="w-full h-6 rounded bg-black/50"></canvas>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <textarea id="live-notes" style="display:none">${esc(notes)}</textarea>
-
-        <div class="mt-5 rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2">
-          <button onclick="openNotesEditor('${session.id}')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-sticky-note"></i> Notes <span id="notes-count" class="text-xs px-2 py-0.5 rounded-full bg-zinc-700">${(notes || '').length}</span>
-          </button>
-          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-bolt"></i> Quick Actions
-          </button>
-          <button class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-wand-magic-sparkles"></i> Transcript
-          </button>
-          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-sparkles"></i> Highlights
-          </button>
-        </div>
-
-        <div class="mt-4 rounded-[24px] border border-zinc-700/70 bg-black/25 p-5">
-          <div class="flex items-center justify-between mb-4">
-            <div>
-              <div class="font-semibold text-lg">Live Transcript <span class="text-xs text-emerald-300 ml-2">• Live</span></div>
-              <div class="text-sm text-zinc-500">Local Whisper types as you talk and saves into the session.</div>
-            </div>
-            <div class="flex items-center gap-2 text-xs text-zinc-400">
-              <span>Auto-save</span>
-              <span class="w-9 h-5 rounded-full bg-cyan-500/80 relative inline-block"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
-            </div>
-          </div>
-          <div id="live-transcript" class="min-h-[210px] max-h-[310px] overflow-auto text-sm leading-7 font-mono whitespace-pre-wrap text-zinc-300"></div>
-          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">•••• ••••••• •••• ••••• ••• ••••••• •••• ••••• ••• ••••••• ••••</div>
-        </div>
-
-        <div class="mt-4 grid md:grid-cols-5 gap-3">
-          <button onclick="generateFromSession('${session.id}', 'summary', this)" class="py-3 rounded-2xl border border-violet-500/40 bg-violet-500/10 text-violet-200 font-medium"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>Summarize</button>
-          <button onclick="generateFromSession('${session.id}', 'tasks', this)" class="py-3 rounded-2xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-medium"><i class="fa-regular fa-square-check mr-2"></i>Extract Tasks</button>
-          <button onclick="generateFromSession('${session.id}', 'decisions', this)" class="py-3 rounded-2xl border border-blue-500/40 bg-blue-500/10 text-blue-200 font-medium"><i class="fa-regular fa-gem mr-2"></i>Decision</button>
-          <button onclick="window.quickMark('${session.id}', 'idea')" class="py-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-medium"><i class="fa-regular fa-lightbulb mr-2"></i>Insight</button>
-          <button onclick="showCaptureIdeaModal()" class="py-3 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 font-medium"><i class="fa-solid fa-share-nodes mr-2"></i>Clip</button>
-        </div>
-
-        <div class="mt-5 rounded-[26px] border border-red-400/40 bg-[#121522]/95 p-4 grid md:grid-cols-[220px_1fr_150px_130px_160px] gap-4 items-center shadow-2xl shadow-black/30">
-          <div class="flex items-center gap-3">
-            <button onclick="stopLiveRoom('${session.id}')" class="w-16 h-16 rounded-full bg-red-500 glow-record flex items-center justify-center"><i class="fa-solid fa-square"></i></button>
-            <div>
-              <div class="text-red-300 font-semibold">RECORDING</div>
-              <div class="text-xs text-zinc-400"><i class="fa-solid fa-microphone mr-1"></i><span id="bottom-capture-label">${captureLabel}</span></div>
-            </div>
-          </div>
-          <div class="text-center">
-            <div class="text-2xl font-mono text-zinc-100" id="bottom-live-timer">00:00</div>
-            <div class="text-xs text-zinc-500">Elapsed time</div>
-          </div>
-          <div class="text-sm text-zinc-300"><i class="fa-solid fa-desktop mr-2"></i>Screen + Mic</div>
-          <div class="text-emerald-300 text-sm"><i class="fa-solid fa-signal mr-2"></i>Good</div>
-          <button onclick="stopLiveRoom('${session.id}')" class="py-3 rounded-2xl bg-zinc-900 border border-zinc-700 font-semibold"><i class="fa-solid fa-pause mr-2"></i>Pause</button>
-        </div>
-      </section>
-
-      <aside class="space-y-4">
-        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
-          <div class="font-semibold mb-4">Session Overview</div>
-          <div class="space-y-4 text-sm">
-            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-clock mr-2"></i>Duration</span><span id="side-live-timer" class="text-red-300 font-mono">00:00</span></div>
-            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-calendar mr-2"></i>Started</span><span>${new Date(session.started_at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span></div>
-            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-solid fa-tag mr-2"></i>Type</span><span>${modeLabel}</span></div>
-            <div class="flex justify-between"><span class="text-zinc-400"><i class="fa-regular fa-circle mr-2"></i>Status</span><span class="text-red-300">Recording</span></div>
-          </div>
-        </div>
-
-        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
-          <div class="font-semibold mb-3">Capture Source</div>
-          <div class="text-cyan-300 text-lg font-semibold"><i class="fa-solid fa-display mr-2"></i><span id="source-card-label">${captureLabel}</span></div>
-          <div class="text-xs text-zinc-500 mt-2">Pick a screen or window when you want video.</div>
-        </div>
-
-        <div class="rounded-[24px] border border-cyan-500/30 bg-cyan-500/10 p-5">
-          <div class="flex items-center justify-between mb-3">
-            <div class="font-semibold"><i class="fa-solid fa-sparkles text-violet-300 mr-2"></i>AI Assistant</div>
-            <span class="text-xs text-emerald-300 border border-emerald-500/40 px-2 py-1 rounded-full">Active</span>
-          </div>
-          <div class="text-sm text-zinc-400 mb-4">Transcribing, detecting insights, and preparing summaries.</div>
-          <div class="h-1 rounded-full bg-zinc-800 overflow-hidden"><div class="h-full w-2/3 bg-gradient-to-r from-cyan-400 to-emerald-400"></div></div>
-        </div>
-
-        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/82 p-5">
-          <div class="font-semibold mb-4">Detected Insights</div>
-          <div class="space-y-2 text-sm">
-            <div class="rounded-xl border border-zinc-700 bg-zinc-900/70 p-3 text-zinc-400">Insights appear as you mark ideas, tasks, and decisions.</div>
-            <button onclick="showQuickActionsMenu('${session.id}', this)" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700">Open Quick Actions <i class="fa-solid fa-arrow-right ml-2"></i></button>
-          </div>
-        </div>
-      </aside>
-    </div>
-  `;
-  */
 }
 
 async function deleteSession(id, btn) {
@@ -599,96 +465,120 @@ async function openSession(id) {
   const tasks = (await window.vibeforge.getTasksBySession(id)) || [];
   const ideas = (await window.vibeforge.getIdeasBySession(id)) || [];
   const timeline = (await window.vibeforge.getTimelineBySession(id)) || [];
+  const rawNotes = s.notes || '';
+  const summaryMatch = rawNotes.match(/\[AI Summary\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
+  const transcriptMatch = rawNotes.match(/\[Live transcript\]\s*([\s\S]*?)(?=\n\n\[|$)/i);
+  const aiSummary = summaryMatch ? summaryMatch[1].trim() : '';
+  const transcriptText = transcriptMatch ? transcriptMatch[1].trim() : '';
+  const cleanNotes = rawNotes
+    .replace(/\n?\[AI Summary\]\s*[\s\S]*?(?=\n\n\[|$)/i, '')
+    .replace(/\n?\[Live transcript\]\s*[\s\S]*?(?=\n\n\[|$)/i, '')
+    .trim();
+  const hasAiOutput = Boolean(aiSummary || tasks.length || decisions.length || ideas.length);
+  const mediaName = s.audio_path ? s.audio_path.split(/[\\/]/).pop() : '';
 
   const content = document.getElementById('main-content');
   content.innerHTML = `
-    <div class="max-w-4xl">
-      <div class="flex justify-between items-center mb-4">
-        <button onclick="switchView('sessions')" class="text-xs text-zinc-400 hover:text-zinc-200">← Back to Sessions</button>
-        <div class="flex gap-2">
-          <button onclick="editSessionTitle('${s.id}')" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl hover:bg-zinc-800">Edit Name</button>
-          <button onclick="deleteSessionFromDetail('${s.id}')" class="px-3 py-1 text-xs border border-red-700 text-red-400 rounded-2xl hover:bg-red-950">Delete Session</button>
-        </div>
-      </div>
+    <div class="min-h-full grid 2xl:grid-cols-[1fr_320px] gap-4">
+      <section class="rounded-[28px] border border-zinc-700/50 bg-[#0b0f1d]/90 overflow-hidden">
+        <div class="p-6 border-b border-zinc-800/80">
+          <div class="flex items-center justify-between gap-3 mb-5">
+            <button onclick="switchView('sessions')" class="px-3 py-2 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-300 hover:text-white"><i class="fa-solid fa-arrow-left mr-2"></i>Sessions</button>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <button onclick="resumeLiveSession('${s.id}')" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold"><i class="fa-solid fa-play mr-2"></i>Resume</button>
+              <button onclick="runSessionAiCleanup('${s.id}', this)" class="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-sm font-semibold"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</button>
+              <button onclick="editSessionTitle('${s.id}')" class="px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-sm"><i class="fa-solid fa-pen"></i></button>
+              <button onclick="deleteSessionFromDetail('${s.id}')" class="px-3 py-2 rounded-xl border border-red-700 text-red-300 text-sm"><i class="fa-solid fa-trash"></i></button>
+            </div>
+          </div>
 
-      <div class="text-2xl font-semibold">${esc(s.title)}</div>
-      <div class="text-xs text-zinc-500 mb-2">${formatSessionMeta(s)}</div>
+          <div class="flex items-start justify-between gap-5">
+            <div class="min-w-0">
+              <div class="text-xs uppercase tracking-[1.8px] text-violet-300 mb-2">${esc(s.mode || 'session')}</div>
+              <h2 class="text-3xl font-semibold tracking-tight truncate">${esc(s.title)}</h2>
+              <div class="text-sm text-zinc-500 mt-2">${formatSessionMeta(s)}</div>
+            </div>
+            <div class="hidden lg:flex gap-3 text-center">
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-3 min-w-24"><div class="text-2xl font-semibold">${tasks.length}</div><div class="text-[10px] text-zinc-500 uppercase">Tasks</div></div>
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-3 min-w-24"><div class="text-2xl font-semibold">${decisions.length}</div><div class="text-[10px] text-zinc-500 uppercase">Decisions</div></div>
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-950/70 px-4 py-3 min-w-24"><div class="text-2xl font-semibold">${ideas.length}</div><div class="text-[10px] text-zinc-500 uppercase">Ideas</div></div>
+            </div>
+          </div>
+        </div>
 
-      <div class="mb-4 p-3 bg-emerald-900/30 border border-emerald-700/60 rounded-2xl">
-        <div class="text-sm font-medium mb-1.5 text-emerald-300">Continue working on this session (multi-visit / keep the convo going)</div>
-        <div class="flex flex-wrap gap-2">
-          <button onclick="resumeLiveSession('${s.id}')" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded-2xl text-sm font-semibold flex items-center gap-2">
-            <i class="fa-solid fa-play"></i> Resume Live (recording + notes + live transcript)
-          </button>
-          <button onclick="editSessionNotesModal('${s.id}')" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-2xl text-sm flex items-center gap-2">
-            <i class="fa-solid fa-edit"></i> Just Edit Notes
-          </button>
-        </div>
-        <div class="text-[10px] text-emerald-400/80 mt-1">New audio segments save alongside previous. Notes &amp; transcript append. Date/time tracked automatically.</div>
-      </div>
+        <div class="p-5">
+          <div class="rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2 mb-4">
+            <button id="review-tab-summary" onclick="switchSessionReviewTab('${s.id}', 'summary')" class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Summary</button>
+            <button id="review-tab-transcript" onclick="switchSessionReviewTab('${s.id}', 'transcript')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-align-left"></i> Transcript</button>
+            <button id="review-tab-notes" onclick="switchSessionReviewTab('${s.id}', 'notes')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sticky-note"></i> Notes</button>
+            <button id="review-tab-artifacts" onclick="switchSessionReviewTab('${s.id}', 'artifacts')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-layer-group"></i> Items</button>
+          </div>
 
-      <div class="mb-6">
-        <div class="font-medium mb-1.5">Session Notes</div>
-        <textarea id="sess-notes" class="w-full h-28 bg-[#111113] border border-zinc-800 rounded-2xl p-4 text-sm">${esc(s.notes || '')}</textarea>
-        <button onclick="saveSessionNotes('${s.id}')" class="mt-2 px-4 py-1 text-xs bg-white text-black rounded-2xl">Save Notes</button>
-      </div>
+          <div id="review-panel-summary" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
+            <div class="flex items-center justify-between mb-4">
+              <div><div class="font-semibold text-lg">AI Review</div><div class="text-sm text-zinc-500">${hasAiOutput ? 'Cleaned up by Local AI or ready for review.' : 'No AI cleanup saved yet. Click AI Cleanup.'}</div></div>
+              <span id="gen-output-${s.id}" class="hidden"></span>
+            </div>
+            ${aiSummary ? `<div class="rounded-2xl border border-violet-500/30 bg-violet-500/10 p-4 mb-4 text-sm leading-7">${esc(aiSummary)}</div>` : `<div class="rounded-2xl border border-dashed border-zinc-700 p-6 text-sm text-zinc-500 mb-4">No summary yet. Stop now shows a processing screen and tries to create one automatically when Ollama is online.</div>`}
+            <div class="grid lg:grid-cols-2 gap-3">
+              <div class="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                <div class="font-semibold mb-3 text-cyan-200">Tasks</div>
+                ${tasks.length ? tasks.slice(0, 6).map(t => `<div class="py-2 border-b border-cyan-500/10 text-sm">${esc(t.title)}</div>`).join('') : '<div class="text-sm text-zinc-500">None extracted yet.</div>'}
+              </div>
+              <div class="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-4">
+                <div class="font-semibold mb-3 text-blue-200">Decisions</div>
+                ${decisions.length ? decisions.slice(0, 6).map(d => `<div class="py-2 border-b border-blue-500/10 text-sm">${esc(d.title)}</div>`).join('') : '<div class="text-sm text-zinc-500">None extracted yet.</div>'}
+              </div>
+            </div>
+          </div>
 
-      ${s.audio_path ? `
-      <div class="mb-6">
-        <div class="font-medium mb-1.5">Recorded Audio / Screen</div>
-        <video controls src="file://${s.audio_path}" class="w-full max-h-[420px] rounded-2xl bg-black"></video>
-        <div class="mt-2">
-          <button onclick="transcribeSession('${s.id}')" class="px-3 py-1 text-xs border border-emerald-700 text-emerald-400 rounded-2xl">Transcribe (local Whisper)</button>
-        </div>
-      </div>
-      ` : ''}
+          <div id="review-panel-transcript" style="display:none" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
+            <div class="flex items-center justify-between mb-4"><div><div class="font-semibold text-lg">Transcript</div><div class="text-sm text-zinc-500">Generated live or from local Whisper.</div></div>${s.audio_path ? `<button onclick="transcribeSession('${s.id}')" class="px-4 py-2 rounded-xl border border-emerald-600 text-emerald-300 text-sm"><i class="fa-solid fa-wave-square mr-2"></i>Run Whisper</button>` : ''}</div>
+            <div class="font-mono text-sm leading-7 whitespace-pre-wrap text-zinc-300">${transcriptText ? esc(transcriptText) : '<span class="text-zinc-500">No transcript saved yet. Run Whisper or record with live captions enabled.</span>'}</div>
+          </div>
 
-      <div class="mb-6">
-        <div class="font-medium mb-2">Quick Actions</div>
-        <div class="flex flex-wrap gap-2">
-          <button onclick="markInSession('${s.id}', 'decision')" class="px-4 py-2 bg-[#111113] border border-zinc-700 rounded-2xl text-sm">Add Decision</button>
-          <button onclick="markInSession('${s.id}', 'task')" class="px-4 py-2 bg-[#111113] border border-zinc-700 rounded-2xl text-sm">Add Task</button>
-          <button onclick="markInSession('${s.id}', 'idea')" class="px-4 py-2 bg-[#111113] border border-zinc-700 rounded-2xl text-sm">Add Idea</button>
-          <button onclick="showCaptureIdeaModal()" class="px-4 py-2 bg-emerald-600 text-white rounded-2xl text-sm">Capture Idea</button>
-        </div>
-      </div>
+          <div id="review-panel-notes" style="display:none" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
+            <div class="flex items-center justify-between mb-4"><div><div class="font-semibold text-lg">Notes</div><div class="text-sm text-zinc-500">Editable raw notes for this session.</div></div><button onclick="saveSessionNotes('${s.id}')" class="px-4 py-2 rounded-xl bg-white text-black text-sm font-semibold">Save Notes</button></div>
+            <textarea id="sess-notes" class="w-full min-h-[260px] bg-zinc-950/70 border border-zinc-700 rounded-2xl p-4 text-sm text-zinc-100 outline-none focus:border-cyan-400">${esc(rawNotes)}</textarea>
+          </div>
 
-      <div class="mb-6">
-        <div class="font-medium mb-2">AI Generate (Ollama)</div>
-        <div class="flex flex-wrap gap-2">
-          <button onclick="generateFromSession('${s.id}', 'summary', this)" class="px-3 py-1 text-xs bg-white text-black rounded-2xl">Generate Summary</button>
-          <button onclick="generateFromSession('${s.id}', 'tasks', this)" class="px-3 py-1 text-xs bg-white text-black rounded-2xl">Generate Tasks</button>
-          <button onclick="generateFromSession('${s.id}', 'decisions', this)" class="px-3 py-1 text-xs bg-white text-black rounded-2xl">Generate Decisions</button>
-          <button onclick="generateFromSession('${s.id}', 'grok', this)" class="px-3 py-1 text-xs bg-white text-black rounded-2xl">Generate Grok Prompt</button>
+          <div id="review-panel-artifacts" style="display:none" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
+            <div class="font-semibold text-lg mb-4">Session Items</div>
+            <div class="grid lg:grid-cols-2 gap-4">
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-950/60 p-4"><div class="font-semibold mb-3">Ideas (${ideas.length})</div>${ideas.length ? ideas.map(i => `<div class="text-sm py-2 border-b border-zinc-800">${esc(i.title)}</div>`).join('') : '<div class="text-sm text-zinc-500">No ideas linked.</div>'}</div>
+              <div class="rounded-2xl border border-zinc-700 bg-zinc-950/60 p-4"><div class="font-semibold mb-3">Timeline (${timeline.length})</div>${timeline.length ? timeline.slice(0, 12).map(e => `<div class="text-xs py-1.5 border-b border-zinc-800">${new Date(e.timestamp).toLocaleTimeString()} - ${esc(e.type)}: ${esc(e.title)}</div>`).join('') : '<div class="text-sm text-zinc-500">No timeline events.</div>'}</div>
+            </div>
+          </div>
         </div>
-        <div class="text-[10px] text-zinc-500 mt-1">AI buttons use Local AI (Ollama). If offline, they will show error — go to Settings &gt; Local AI to set up.</div>
-        <div id="gen-output-${s.id}" class="mt-2 text-xs bg-zinc-900 p-2 rounded hidden"></div>
-      </div>
+      </section>
 
-      <div class="flex flex-wrap gap-2">
-        <button onclick="exportSessionMdReal('${s.id}')" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl">Export Session Markdown</button>
-        <button onclick="exportGrokPromptReal('${s.id}')" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl">Export Grok Prompt TXT</button>
-        <button onclick="revealExportsForProject()" class="px-3 py-1 text-xs border border-zinc-700 rounded-2xl">Reveal Export Folder</button>
-      </div>
+      <aside class="space-y-4">
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-4">Session Status</div>
+          <div class="space-y-4 text-sm">
+            <div class="flex justify-between"><span class="text-zinc-400">AI cleanup</span><span class="${hasAiOutput ? 'text-emerald-300' : 'text-amber-300'}">${hasAiOutput ? 'Ready' : 'Needed'}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Transcript</span><span class="${transcriptText ? 'text-emerald-300' : 'text-zinc-500'}">${transcriptText ? 'Saved' : 'Missing'}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Recording</span><span class="${s.audio_path ? 'text-emerald-300' : 'text-zinc-500'}">${s.audio_path ? 'Saved' : 'None'}</span></div>
+          </div>
+        </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        <div>
-          <div class="font-medium mb-2">Linked Decisions (${decisions.length})</div>
-          ${decisions.length ? decisions.map(d => `<div class="text-sm py-1 border-b border-zinc-800">${esc(d.title)} <span class="text-xs text-zinc-500">[${esc(d.status)}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-3">Recording</div>
+          ${s.audio_path ? `<audio controls src="file://${s.audio_path}" class="w-full" style="height:38px"></audio><div class="mt-2 text-xs text-zinc-500 truncate">${esc(mediaName)}</div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
         </div>
-        <div>
-          <div class="font-medium mb-2">Linked Tasks (${tasks.length})</div>
-          ${tasks.length ? tasks.map(t => `<div class="text-sm py-1 border-b border-zinc-800">${esc(t.title)} <span class="text-xs text-zinc-500">[${esc(t.status)}]</span></div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
+
+        <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
+          <div class="font-semibold mb-3">Actions</div>
+          <div class="space-y-2">
+            <button onclick="resumeLiveSession('${s.id}')" class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold text-sm">Resume Session</button>
+            <button onclick="runSessionAiCleanup('${s.id}', this)" class="w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 font-semibold text-sm">Run AI Cleanup</button>
+            ${s.audio_path ? `<button onclick="transcribeSession('${s.id}')" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">Transcribe Recording</button>` : ''}
+            <button onclick="showQuickActionsMenu('${s.id}', this)" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">Add Task / Decision / Idea</button>
+            <button onclick="exportSessionMdReal('${s.id}')" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">Export Markdown</button>
+            <button onclick="exportGrokPromptReal('${s.id}')" class="w-full py-3 rounded-xl bg-zinc-900 border border-zinc-700 text-sm">Export AI Prompt</button>
+          </div>
         </div>
-        <div>
-          <div class="font-medium mb-2">Linked Ideas (${ideas.length})</div>
-          ${ideas.length ? ideas.map(i => `<div class="text-sm py-1 border-b border-zinc-800">${esc(i.title)}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
-        </div>
-        <div>
-          <div class="font-medium mb-2">Timeline Events (${timeline.length})</div>
-          ${timeline.length ? timeline.map(e => `<div class="text-xs py-0.5">${new Date(e.timestamp).toLocaleTimeString()} - ${esc(e.type)}: ${esc(e.title)}</div>`).join('') : '<div class="text-xs text-zinc-500">None</div>'}
-        </div>
-      </div>
+      </aside>
     </div>
   `;
 }
@@ -717,6 +607,31 @@ async function saveSessionNotes(id) {
   showToast('Notes saved');
 }
 
+window.switchSessionReviewTab = function(sessionId, tab) {
+  const tabs = ['summary', 'transcript', 'notes', 'artifacts'];
+  for (const name of tabs) {
+    const panel = document.getElementById(`review-panel-${name}`);
+    const btn = document.getElementById(`review-tab-${name}`);
+    const active = name === tab;
+    if (panel) panel.style.display = active ? '' : 'none';
+    if (btn) {
+      btn.classList.toggle('bg-indigo-600/40', active);
+      btn.classList.toggle('border', active);
+      btn.classList.toggle('border-indigo-500/40', active);
+      btn.classList.toggle('text-indigo-100', active);
+      btn.classList.toggle('hover:bg-zinc-800', !active);
+      btn.classList.toggle('text-zinc-300', !active);
+    }
+  }
+};
+
+window.runSessionAiCleanup = async function(sessionId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Running AI...'; }
+  showSessionProcessingScreen(sessionId, 'Running AI cleanup', 'Sending session notes to your local Ollama model...');
+  await autoProcessSessionAfterStop(sessionId);
+  await openSession(sessionId);
+};
+
 async function markInSession(sessionId, type) {
   const title = await window.showInputModal(`New ${type} title`, '', `Add a quick ${type}`);
   if (!title) return;
@@ -730,11 +645,24 @@ async function markInSession(sessionId, type) {
   await switchView(currentView);
 }
 
+async function addTimestampedNoteToSession(sessionId) {
+  const n = await window.showInputModal('Session note', '', 'Add a timestamped note');
+  if (!n) return;
+  const sessions = await window.vibeforge.getSessions(currentProject.id);
+  const s = sessions.find(x => x.id === sessionId);
+  if (!s) return;
+  const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const nextNotes = (s.notes || '') + ((s.notes || '') ? '\n' : '') + `${stamp}: ${n}`;
+  await window.vibeforge.updateSessionNotes(sessionId, nextNotes);
+  showToast('Note added');
+  await openSession(sessionId);
+}
+
 window.resumeLiveSession = async function(id) {
   const sessions = await window.vibeforge.getSessions(currentProject.id);
   const s = sessions.find(x => x.id === id);
   if (s) {
-    showToast('Resuming session — new recordings will be additional segments with their own timestamps.');
+    showToast('Resuming session - new recordings will be additional segments with their own timestamps.');
     await renderLiveRoom(s);
   }
 };
@@ -798,11 +726,45 @@ window.openNotesEditor = function(sessionId) {
   modal.onclick = (e) => { if (e.target === modal) doCancel(); };
 };
 
+// Tab switcher for live recording panel (Transcript / Highlights)
+window.switchLiveTab = function(tab, sessionId) {
+  const transcriptPanel = document.getElementById('live-transcript-panel');
+  const highlightsPanel = document.getElementById('live-highlights-panel');
+  const tabTranscript = document.getElementById('tab-transcript');
+  const tabHighlights = document.getElementById('tab-highlights');
+
+  const activeClass = ['bg-indigo-600/40', 'border', 'border-indigo-500/40', 'text-indigo-100'];
+  const inactiveClass = ['hover:bg-zinc-800', 'text-zinc-300'];
+
+  if (tab === 'transcript') {
+    if (transcriptPanel) transcriptPanel.style.display = '';
+    if (highlightsPanel) highlightsPanel.style.display = 'none';
+    if (tabTranscript) { activeClass.forEach(c => tabTranscript.classList.add(c)); inactiveClass.forEach(c => tabTranscript.classList.remove(c)); }
+    if (tabHighlights) { activeClass.forEach(c => tabHighlights.classList.remove(c)); inactiveClass.forEach(c => tabHighlights.classList.add(c)); }
+  } else {
+    if (transcriptPanel) transcriptPanel.style.display = 'none';
+    if (highlightsPanel) {
+      highlightsPanel.style.display = '';
+      // Populate highlights from marked moments
+      const marks = document.querySelectorAll('[data-highlight]');
+      const liveNotes = (document.getElementById('live-notes') || {}).value || '';
+      const lines = liveNotes.split('\n').filter(l => l.includes('Marked ') || l.includes('Clip ') || l.includes('Decision ') || l.includes('Task ') || l.includes('Idea '));
+      if (lines.length > 0) {
+        highlightsPanel.innerHTML = `<div class="font-semibold text-sm mb-3">Marked moments this session</div>` +
+          lines.map(l => `<div class="text-xs py-1.5 border-b border-zinc-800 text-zinc-300">${esc(l)}</div>`).join('');
+      } else {
+        highlightsPanel.innerHTML = '<div class="text-xs text-zinc-500">No highlights yet - use Mark Idea, Mark Task, or Decision buttons to tag moments.</div>';
+      }
+    }
+    if (tabHighlights) { activeClass.forEach(c => tabHighlights.classList.add(c)); inactiveClass.forEach(c => tabHighlights.classList.remove(c)); }
+    if (tabTranscript) { activeClass.forEach(c => tabTranscript.classList.remove(c)); inactiveClass.forEach(c => tabTranscript.classList.add(c)); }
+  }
+};
+
 // Quick actions as a button menu (popup, better than scattered buttons, nicer UI)
 window.showQuickActionsMenu = function(sessionId, btnEl) {
   // Remove any existing menu
   document.querySelectorAll('.quick-actions-menu').forEach(m => m.remove());
-
   const rect = btnEl.getBoundingClientRect();
   const menu = document.createElement('div');
   menu.className = 'quick-actions-menu fixed bg-[#111113] border border-zinc-700 rounded-2xl shadow-xl py-1 text-sm z-[300] min-w-[200px]';
@@ -810,10 +772,10 @@ window.showQuickActionsMenu = function(sessionId, btnEl) {
   menu.style.top = `${rect.bottom + 4}px`;
 
   const items = [
-    { icon: 'fa-gavel', label: 'Mark Decision', action: () => window.quickMark(sessionId, 'decision') },
-    { icon: 'fa-tasks', label: 'Mark Task', action: () => window.quickMark(sessionId, 'task') },
-    { icon: 'fa-lightbulb', label: 'Mark Idea', action: () => window.quickMark(sessionId, 'idea') },
-    { icon: 'fa-comment', label: 'Add Timestamped Note', action: () => window.addQuickNote(sessionId) },
+    { icon: 'fa-gavel', label: 'Mark Decision', action: () => document.getElementById('live-notes') && window.quickMark ? window.quickMark(sessionId, 'decision') : markInSession(sessionId, 'decision') },
+    { icon: 'fa-tasks', label: 'Mark Task', action: () => document.getElementById('live-notes') && window.quickMark ? window.quickMark(sessionId, 'task') : markInSession(sessionId, 'task') },
+    { icon: 'fa-lightbulb', label: 'Mark Idea', action: () => document.getElementById('live-notes') && window.quickMark ? window.quickMark(sessionId, 'idea') : markInSession(sessionId, 'idea') },
+    { icon: 'fa-comment', label: 'Add Timestamped Note', action: () => document.getElementById('live-notes') && window.addQuickNote ? window.addQuickNote(sessionId) : addTimestampedNoteToSession(sessionId) },
   ];
 
   if (document.getElementById('capture-label')) { // isRoom
@@ -980,13 +942,19 @@ let inputModalResolve = null;
 
 window.showInputModal = function(title, defaultValue = '', hint = '') {
   return new Promise((resolve) => {
+    document.querySelectorAll('.quick-actions-menu').forEach(m => m.remove());
+    document.querySelectorAll('.source-picker-modal').forEach(m => m.remove());
     inputModalResolve = resolve;
     const modal = document.getElementById('input-modal');
     if (!modal) { resolve(null); return; }
     document.getElementById('input-modal-title').textContent = title || 'Input';
     const input = document.getElementById('input-modal-input');
+    input.disabled = false;
+    input.readOnly = false;
     input.value = defaultValue || '';
     input.placeholder = hint || '';
+    input.onclick = (e) => { e.stopPropagation(); input.focus({ preventScroll: true }); };
+    input.onpointerdown = (e) => { e.stopPropagation(); };
     document.getElementById('input-modal-hint').textContent = hint || '';
     modal.classList.remove('hidden');
     modal.classList.add('flex');
@@ -1005,6 +973,8 @@ window.showInputModal = function(title, defaultValue = '', hint = '') {
       modal.classList.add('hidden');
       modal.classList.remove('flex');
       input.onkeydown = null;
+      input.onclick = null;
+      input.onpointerdown = null;
       okBtn.onclick = null;
       inputModalResolve = null;
       resolve(val);
@@ -1053,7 +1023,7 @@ window.confirmNewSession = async function() {
     const fallbackName = `Session ${new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
     const name = rawName || fallbackName;
     if (!currentProject || !currentProject.id) {
-      showToast('No project selected — creating one first...');
+      showToast('No project selected - creating one first...');
       await createFirstProject();
       if (!currentProject) { hideNewSessionModal(); return; }
     }
@@ -1095,70 +1065,14 @@ async function renderLiveRoom(session) {
   let captionBuf = [];
   let captionBufLen = 0;
   let captionRate = 48000;
+  let lastCaptionText = '';
+  let repeatedCaptionCount = 0;
+
+  // Always clear any existing timer before starting a new one
+  if (_globalTimerInterval) { clearInterval(_globalTimerInterval); _globalTimerInterval = null; }
 
   const modeLabel = session.mode === 'manual' ? 'Manual Session' : 'Room Session';
   const isRoom = session.mode !== 'manual';
-
-  content.innerHTML = `
-    <div class="max-w-3xl">
-      <div class="flex justify-between mb-3">
-        <div>
-          <div class="font-semibold text-lg">${esc(session.title)} <span class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">${modeLabel}</span></div>
-          <div id="live-timer" class="font-mono text-4xl text-red-500 tracking-tighter">00:00</div>
-          <div id="mic-status" class="text-xs text-zinc-500 mt-0.5"></div>
-        </div>
-        <div class="text-right">
-          <button id="stop-btn" onclick="stopLiveRoom('${session.id}')" class="px-6 py-2.5 bg-red-600 hover:bg-red-500 rounded-2xl text-sm font-semibold shadow">Stop &amp; Save Session</button>
-        </div>
-      </div>
-
-      ${isRoom ? `
-      <div class="mb-3 p-3 bg-red-950/60 border border-red-500/40 rounded-3xl flex items-center gap-3 text-sm">
-        <div class="flex items-center gap-2 text-red-400">
-          <i class="fa-solid fa-circle fa-beat"></i>
-          <span class="font-bold tracking-wide">RECORDING</span>
-        </div>
-        <div class="text-red-300/90">•</div>
-        <div id="capture-label" class="font-medium text-red-100 flex-1 truncate">${captureLabel}</div>
-        <button onclick="pickScreenForLive()" class="px-3 py-1 text-xs rounded-2xl bg-red-900 hover:bg-red-800 border border-red-600/60">Pick screen / window</button>
-        <div class="text-[10px] text-red-400/70">overlay</div>
-      </div>
-      ` : ''}
-
-      <!-- Hidden live-notes for compatibility with stop/save logic -->
-      <textarea id="live-notes" style="display:none">${esc(notes)}</textarea>
-
-      <div class="mb-3 flex gap-2">
-        <button onclick="openNotesEditor('${session.id}')" class="flex-1 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-2xl text-sm flex items-center justify-center gap-2">
-          <i class="fa-solid fa-sticky-note"></i> 
-          <span>Notes <span id="notes-count" class="text-xs text-zinc-400">(${ (notes||'').length })</span></span>
-        </button>
-        <button onclick="showQuickActionsMenu('${session.id}', this)" class="flex-1 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-2xl text-sm flex items-center justify-center gap-2">
-          <i class="fa-solid fa-bolt"></i> Quick Actions
-        </button>
-      </div>
-
-      ${isRoom ? `
-      <div class="mb-4">
-        <div class="flex items-center justify-between mb-1">
-          <div class="font-medium">Mic Level</div>
-          <div id="mic-status-text" class="text-xs text-emerald-400">Listening…</div>
-        </div>
-        <canvas id="mic-meter" width="420" height="18" class="bg-zinc-950 border border-zinc-800 rounded"></canvas>
-      </div>
-
-      <div class="mb-4">
-        <div class="font-medium mb-1 flex items-center gap-2">
-          Live Transcript <span class="text-[10px] text-zinc-500">(local Whisper • a few seconds behind speech)</span>
-        </div>
-        <div id="live-transcript" class="bg-black/60 border border-zinc-800 rounded-2xl p-3 text-sm h-24 overflow-auto font-mono whitespace-pre-wrap leading-snug"></div>
-        <div class="text-[10px] text-zinc-500 mt-1">Real on-device transcription — types in as you talk. Saved into session notes on Stop.</div>
-      </div>
-      ` : ''}
-
-      <div class="text-xs text-zinc-500">Use the buttons above for notes &amp; quick actions. Recording continues until Stop. Resume this session anytime from the list or detail view.</div>
-    </div>
-  `;
 
   content.innerHTML = `
     <div class="min-h-full grid 2xl:grid-cols-[1fr_300px] gap-4">
@@ -1176,20 +1090,20 @@ async function renderLiveRoom(session) {
             </div>
             <div id="live-timer" class="font-mono text-6xl text-red-400 tracking-tighter mb-2">00:00</div>
             <div id="mic-status" class="hidden"></div>
-            <div class="h-7 overflow-hidden mb-4 text-red-400/80 text-xs tracking-[3px] whitespace-nowrap">••• ••••• •• ••••••• ••• •••• ••••• •• ••••••• ••• ••••</div>
+            <div class="h-7 overflow-hidden mb-4 text-red-400/80 text-xs tracking-[3px] whitespace-nowrap">--- ----- -- ------- --- ---- ----- -- ------- --- ----</div>
           </div>
 
-          <div class="grid sm:grid-cols-[128px_1fr] gap-4">
-            <button id="stop-btn" onclick="stopLiveRoom('${session.id}')" class="w-32 h-32 rounded-full bg-red-500/10 border border-red-400/30 flex flex-col items-center justify-center glow-record text-red-100">
-              <span class="w-20 h-20 rounded-full bg-gradient-to-br from-red-300 to-red-600 flex items-center justify-center shadow-2xl shadow-red-500/30">
-                <i class="fa-solid fa-square text-2xl"></i>
+          <div class="grid sm:grid-cols-[150px_1fr] gap-4">
+            <button id="stop-btn" onclick="stopLiveRoom('${session.id}')" class="h-24 rounded-[26px] bg-red-500/10 border border-red-400/30 flex items-center justify-center gap-3 glow-record text-red-100">
+              <span class="w-12 h-12 rounded-2xl bg-gradient-to-br from-red-300 to-red-600 flex items-center justify-center shadow-2xl shadow-red-500/30">
+                <i class="fa-solid fa-square text-lg"></i>
               </span>
-              <span class="mt-2 text-[11px] font-semibold text-red-300">Stop &amp; Save</span>
+              <span class="text-left"><span class="block text-sm font-semibold text-red-200">Stop &amp; Save</span><span class="block text-[10px] text-red-300/70">Finish session</span></span>
             </button>
             <div class="space-y-3">
               <div class="grid grid-cols-2 gap-2">
                 <button onclick="pickScreenForLive()" class="rounded-2xl border border-red-400/40 bg-red-500/10 p-4 text-center text-sm text-red-100"><i class="fa-solid fa-desktop text-xl mb-2"></i><br>Screen</button>
-                <button onclick="pickScreenForLive()" class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4 text-center text-sm text-zinc-300"><i class="fa-regular fa-window-maximize text-xl mb-2"></i><br>Window</button>
+                <button onclick="pickWindowForLive()" class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4 text-center text-sm text-zinc-300"><i class="fa-regular fa-window-maximize text-xl mb-2"></i><br>Window</button>
               </div>
               <div class="rounded-2xl border border-zinc-700 bg-zinc-900/70 p-4">
                 <div class="flex justify-between text-sm mb-2"><span class="text-zinc-300"><i class="fa-solid fa-microphone mr-2"></i>Mic input</span><span id="mic-status-text" class="text-emerald-300">Good</span></div>
@@ -1204,20 +1118,25 @@ async function renderLiveRoom(session) {
         <div class="mt-5 rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2">
           <button onclick="openNotesEditor('${session.id}')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sticky-note"></i> Notes <span id="notes-count" class="text-xs px-2 py-0.5 rounded-full bg-zinc-700">${(notes || '').length}</span></button>
           <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-bolt"></i> Quick Actions</button>
-          <button class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-wand-magic-sparkles"></i> Transcript</button>
-          <button onclick="showQuickActionsMenu('${session.id}', this)" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Highlights</button>
+          <button id="tab-transcript" onclick="switchLiveTab('transcript', '${session.id}')" class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-wand-magic-sparkles"></i> Transcript</button>
+          <button id="tab-highlights" onclick="switchLiveTab('highlights', '${session.id}')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Highlights</button>
         </div>
 
         <div class="mt-4 rounded-[24px] border border-zinc-700/70 bg-black/25 p-5">
           <div class="flex items-center justify-between mb-4">
             <div>
-              <div class="font-semibold text-lg">Live Transcript <span class="text-xs text-emerald-300 ml-2">• Live</span></div>
+              <div class="font-semibold text-lg">Live Transcript <span class="text-xs text-emerald-300 ml-2">- Live</span></div>
               <div class="text-sm text-zinc-500">Local Whisper types as you talk and saves into the session.</div>
             </div>
             <div class="flex items-center gap-2 text-xs text-zinc-400"><span>Auto-save</span><span class="w-9 h-5 rounded-full bg-cyan-500/80 relative inline-block"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span></div>
           </div>
-          <div id="live-transcript" class="min-h-[190px] max-h-[280px] overflow-auto text-sm leading-7 font-mono whitespace-pre-wrap text-zinc-300"></div>
-          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">•••• ••••••• •••• ••••• ••• ••••••• •••• ••••• •••</div>
+          <div id="live-transcript-panel">
+            <div id="live-transcript" class="min-h-[190px] max-h-[280px] overflow-auto text-sm leading-7 font-mono whitespace-pre-wrap text-zinc-300"></div>
+          </div>
+          <div id="live-highlights-panel" style="display:none" class="min-h-[120px] text-sm text-zinc-300 p-2">
+            <div class="text-xs text-zinc-500">No highlights yet - use Mark Idea, Mark Task, or Decision buttons to tag moments.</div>
+          </div>
+          <div class="mt-3 h-6 text-cyan-300/80 text-xs tracking-[3px] overflow-hidden">---- ------- ---- ----- --- ------- ---- ----- ---</div>
         </div>
 
         <div class="mt-4 grid md:grid-cols-5 gap-3">
@@ -1225,7 +1144,7 @@ async function renderLiveRoom(session) {
           <button onclick="markMoment('${session.id}', 'task')" class="py-3 rounded-2xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-medium"><i class="fa-regular fa-square-check mr-2"></i>Mark Task</button>
           <button onclick="markMoment('${session.id}', 'decision')" class="py-3 rounded-2xl border border-blue-500/40 bg-blue-500/10 text-blue-200 font-medium"><i class="fa-regular fa-gem mr-2"></i>Decision</button>
           <button onclick="clipMoment('${session.id}')" class="py-3 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 font-medium"><i class="fa-solid fa-scissors mr-2"></i>Clip</button>
-          <button onclick="generateFromSession('${session.id}', 'summary', this)" class="py-3 rounded-2xl border border-violet-500/40 bg-violet-500/10 text-violet-200 font-medium"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</button>
+          <button onclick="generateFromSession('${session.id}', 'summary', this)" title="Runs local AI to summarize notes, extract tasks and decisions, and rename the session" class="py-3 rounded-2xl border border-violet-500/40 bg-violet-500/10 text-violet-200 font-medium"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>AI Cleanup</button>
         </div>
 
         <div class="mt-5 rounded-[26px] border border-red-400/40 bg-[#121522]/95 p-4 grid xl:grid-cols-[210px_1fr_140px_110px_140px] gap-4 items-center shadow-2xl shadow-black/30">
@@ -1242,7 +1161,7 @@ async function renderLiveRoom(session) {
           <div class="font-semibold mb-4">Session Overview</div>
           <div class="space-y-4 text-sm">
             <div class="flex justify-between"><span class="text-zinc-400">Duration</span><span id="side-live-timer" class="text-red-300 font-mono">00:00</span></div>
-            <div class="flex justify-between"><span class="text-zinc-400">Started</span><span>${new Date(session.started_at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span></div>
+            <div class="flex justify-between"><span class="text-zinc-400">Started</span><span>${new Date(session.started_at || Date.now()).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) + ' - ' + new Date(session.started_at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span></div>
             <div class="flex justify-between"><span class="text-zinc-400">Type</span><span>${modeLabel}</span></div>
             <div class="flex justify-between"><span class="text-zinc-400">Status</span><span class="text-red-300">Recording</span></div>
           </div>
@@ -1268,7 +1187,7 @@ async function renderLiveRoom(session) {
     </div>
   `;
 
-  // Timer (always)
+  // Timer (always) - stored globally so repeated calls don't stack intervals
   const start = Date.now();
   timerInterval = setInterval(() => {
     const sec = Math.floor((Date.now() - start) / 1000);
@@ -1278,6 +1197,7 @@ async function renderLiveRoom(session) {
       if (el) el.textContent = text;
     });
   }, 1000);
+  _globalTimerInterval = timerInterval;
 
   function updateCaptureUI(label) {
     captureLabel = label || captureLabel;
@@ -1293,10 +1213,77 @@ async function renderLiveRoom(session) {
   // This ensures the onclick="..." strings in the injected live-room HTML (Stop, Pick screen, quick Mark buttons, Add Note)
   // and the overlay buttons can resolve the names *immediately* when the view appears.
   // The functions close over the `let` variables declared at the top of renderLiveRoom (populated later during setup).
-  // Previously these assignments were after the awaits → buttons threw "xxx is not defined" + appeared to do nothing.
+  // Previously these assignments were after the awaits -> buttons threw "xxx is not defined" + appeared to do nothing.
+  async function pickDesktopSource(kind = 'screen') {
+    const sources = await window.vibeforge.getScreenSources();
+    const filtered = sources.filter(s => kind === 'window' ? s.id.startsWith('window:') : s.id.startsWith('screen:'));
+    const list = filtered.length ? filtered : sources;
+    if (!list.length) throw new Error('No screen/window sources found');
+
+    return await new Promise((resolve) => {
+      const modal = document.createElement('div');
+      modal.className = 'source-picker-modal fixed inset-0 z-[700] bg-black/80 flex items-center justify-center p-6';
+      modal.innerHTML = `
+        <div class="w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-[28px] border border-zinc-600 bg-[#0b0f1d] shadow-2xl">
+          <div class="p-5 border-b border-zinc-800 flex items-center justify-between">
+            <div>
+              <div class="font-semibold text-xl">Choose ${kind === 'window' ? 'a window' : 'a screen'} to capture</div>
+              <div class="text-sm text-zinc-500">This is local only. Cancel anytime.</div>
+            </div>
+            <button class="close px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700">Cancel</button>
+          </div>
+          <div class="p-5 grid md:grid-cols-3 gap-4 overflow-auto max-h-[65vh]">
+            ${list.map((s, idx) => `
+              <button data-idx="${idx}" class="source-card text-left rounded-2xl border border-zinc-700 bg-zinc-900/70 hover:border-cyan-400 overflow-hidden">
+                ${s.thumbnail ? `<img src="${s.thumbnail}" class="w-full h-32 object-cover bg-black">` : `<div class="w-full h-32 bg-black"></div>`}
+                <div class="p-3 text-sm font-medium truncate">${esc(s.name)}</div>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      const cleanup = (value) => { modal.remove(); resolve(value); };
+      modal.querySelector('.close').onclick = () => cleanup(null);
+      modal.onclick = (e) => { if (e.target === modal) cleanup(null); };
+      modal.querySelectorAll('.source-card').forEach(btn => {
+        btn.onclick = () => cleanup(list[Number(btn.dataset.idx)]);
+      });
+    });
+  }
+
+  async function getDesktopStream(kind = 'screen') {
+    try {
+      return await navigator.mediaDevices.getDisplayMedia({
+        video: kind === 'window' ? { displaySurface: 'window' } : true,
+        audio: true,
+        preferCurrentTab: false
+      });
+    } catch (nativeErr) {
+      const source = await pickDesktopSource(kind);
+      if (!source) throw new Error('cancelled');
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: source.id,
+              maxWidth: 3840,
+              maxHeight: 2160,
+              maxFrameRate: 30
+            }
+          }
+        });
+      } catch (fallbackErr) {
+        throw new Error(`Screen source failed: ${fallbackErr.message || nativeErr.message}`);
+      }
+    }
+  }
+
   window.pickScreenForLive = async function() {
     try {
-      const ds = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const ds = await getDesktopStream('screen');
       displayStream = ds;
       const vt = ds.getVideoTracks()[0];
       const nice = vt ? (vt.label || vt.getSettings().displaySurface || 'Display') : 'System audio only';
@@ -1317,7 +1304,7 @@ async function renderLiveRoom(session) {
       }
       if (prev) prev.srcObject = ds;
 
-      showToast('Screen set: ' + captureLabel + '. ' + (isRecording ? 'Switching source…' : ''));
+      showToast('Screen set: ' + captureLabel + '. ' + (isRecording ? 'Switching source...' : ''));
 
       if (isRecording && mediaRecorder && micStream) {
         // mid-session switch: flush, stop current recorder (chunks kept), restart with combined
@@ -1341,12 +1328,63 @@ async function renderLiveRoom(session) {
     }
   };
 
+  // Window picker - same as screen but requests a specific window surface
+  window.pickWindowForLive = async function() {
+    try {
+      const ds = await getDesktopStream('window');
+      displayStream = ds;
+      const vt = ds.getVideoTracks()[0];
+      const nice = vt ? (vt.label || 'Window') : 'Window audio';
+      updateCaptureUI(nice + ' + mic');
+      let prev = document.getElementById('screen-prev');
+      if (!prev && isRoom) {
+        const area = document.getElementById('live-transcript');
+        if (area && area.parentNode) {
+          prev = document.createElement('video');
+          prev.id = 'screen-prev';
+          prev.autoplay = true;
+          prev.muted = true;
+          prev.style.cssText = 'width:100%;max-height:160px;border-radius:12px;border:1px solid #1e3a3a;background:#000;margin-top:6px;object-fit:contain;';
+          area.parentNode.insertBefore(prev, area.nextSibling);
+        }
+      }
+      if (prev) prev.srcObject = ds;
+      showToast('Window capture set. ' + (isRecording ? 'Switching source...' : ''));
+      if (isRecording && mediaRecorder && micStream) {
+        try { mediaRecorder.requestData(); mediaRecorder.stop(); } catch(e){}
+        const auds = [...micStream.getAudioTracks(), ...ds.getAudioTracks()];
+        const vids = ds.getVideoTracks();
+        const combined = new MediaStream([...auds, ...vids]);
+        mediaRecorder = new MediaRecorder(combined);
+        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+        mediaRecorder.onstop = () => { try { combined.getTracks().forEach(t => t.stop()); } catch(e){} };
+        mediaRecorder.start();
+      }
+    } catch (e) {
+      showToast('Window pick: ' + (e.message || 'cancelled'));
+    }
+  };
+
   window.stopLiveRoom = async function(id) {
     clearInterval(timerInterval);
+    _globalTimerInterval = null;
     if (captionTimer) { try { clearInterval(captionTimer); } catch(e){} captionTimer = null; }
     if (captionNode) { try { captionNode.disconnect(); } catch(e){} captionNode = null; }
     if (isRecording && mediaRecorder) {
-      try { mediaRecorder.stop(); } catch(e){}
+      try {
+        if (mediaRecorder.state !== 'inactive') {
+          await new Promise((resolve) => {
+            const prevStop = mediaRecorder.onstop;
+            mediaRecorder.onstop = (ev) => {
+              try { if (prevStop) prevStop(ev); } catch (_) {}
+              resolve();
+            };
+            try { mediaRecorder.requestData(); } catch (_) {}
+            try { mediaRecorder.stop(); } catch (_) { resolve(); }
+            setTimeout(resolve, 1200);
+          });
+        }
+      } catch(e){}
       isRecording = false;
     }
 
@@ -1372,14 +1410,13 @@ async function renderLiveRoom(session) {
         const arrayBuffer = await audioBlob.arrayBuffer();
         const savedPath = await window.vibeforge.saveAudio(id, arrayBuffer);
         await window.vibeforge.updateSessionAudio(id, savedPath);
-        showToast('Session + recording saved');
       } catch (e) {
-        showToast('Session saved (audio save issue: ' + e.message + ')');
+        showToast('Audio save issue: ' + e.message);
       }
-    } else {
-      showToast('Session saved');
     }
 
+    showSessionProcessingScreen(id, 'Session saved', 'Starting local AI cleanup...');
+    await autoProcessSessionAfterStop(id);
     await openSession(id);
   };
 
@@ -1434,6 +1471,7 @@ async function renderLiveRoom(session) {
   };
 
   // Helper: typewriter append for good feel
+  let _transcriptUserScrolled = false;
   function typewriterAppend(delta, container) {
     if (!container || !delta) return;
     const chars = delta.split('');
@@ -1441,11 +1479,21 @@ async function renderLiveRoom(session) {
     function step() {
       if (i < chars.length) {
         container.textContent += chars[i++];
-        container.scrollTop = container.scrollHeight;
-        setTimeout(step, 16); // nice fast typewriter cadence
+        // Only auto-scroll if user hasn't manually scrolled up
+        if (!_transcriptUserScrolled) container.scrollTop = container.scrollHeight;
+        setTimeout(step, 16);
       }
     }
     step();
+  }
+
+  // Pause auto-scroll when user scrolls up; resume when they scroll back to bottom
+  const _tElForScroll = document.getElementById('live-transcript');
+  if (_tElForScroll) {
+    _tElForScroll.addEventListener('scroll', () => {
+      const atBottom = _tElForScroll.scrollHeight - _tElForScroll.scrollTop - _tElForScroll.clientHeight < 30;
+      _transcriptUserScrolled = !atBottom;
+    });
   }
 
   // No floating draggable overlay. The recording state now lives inside the page dock only,
@@ -1486,7 +1534,7 @@ async function renderLiveRoom(session) {
 
       mediaRecorder.start();
       isRecording = true;
-      if (micStatus) micStatus.textContent = 'Recording… (screen/mic)';
+      if (micStatus) micStatus.textContent = 'Recording... (screen/mic)';
 
       // Mic level (always on the mic source)
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -1500,16 +1548,24 @@ async function renderLiveRoom(session) {
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
         analyser.getByteFrequencyData(dataArray);
         const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        const width = (avg / 255) * canvas.width;
         ctx.fillStyle = '#111113';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#ef4444';
-        ctx.fillRect(0, 0, width, canvas.height);
+        const bars = 24;
+        const active = Math.max(1, Math.round((avg / 255) * bars));
+        const gap = 3;
+        const barW = Math.max(3, Math.floor((canvas.width - gap * (bars - 1)) / bars));
+        for (let i = 0; i < bars; i++) {
+          const h = Math.max(4, canvas.height * (0.35 + (i % 5) * 0.11));
+          const x = i * (barW + gap);
+          const y = (canvas.height - h) / 2;
+          ctx.fillStyle = i < active ? '#2dd4bf' : 'rgba(148,163,184,0.13)';
+          ctx.fillRect(x, y, barW, h);
+        }
         requestAnimationFrame(drawMeter);
       }
       drawMeter();
 
-      // === Live captions via local Whisper (chunked, real transcription — no cloud, no browser API) ===
+      // === Live captions via local Whisper (chunked, real transcription - no cloud, no browser API) ===
       // Mic PCM accumulates; every few seconds a chunk is resampled to 16k WAV and run through
       // whisper.cpp in the main process. Self-pacing: while one chunk transcribes, audio keeps buffering.
       const tEl = document.getElementById('live-transcript');
@@ -1530,12 +1586,12 @@ async function renderLiveRoom(session) {
           source.connect(captionNode);
           captionNode.connect(audioContext.destination);
 
-          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Listening… captions appear a few seconds behind speech.</span>';
+          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Listening... captions appear a few seconds behind speech.</span>';
           let firstCaption = true;
 
           captionTimer = setInterval(async () => {
             if (captionBusy) return;
-            if (captionBufLen < captionRate * 4) return; // wait for ~4s of audio
+            if (captionBufLen < captionRate * 2.6) return; // faster live captions, still enough context for Whisper
             const merged = new Float32Array(captionBufLen);
             let o = 0;
             for (const c of captionBuf) { merged.set(c, o); o += c.length; }
@@ -1544,7 +1600,7 @@ async function renderLiveRoom(session) {
             // silence gate: skip chunks with no real signal (whisper hallucinates on silence)
             let sum = 0, n = 0;
             for (let i = 0; i < merged.length; i += 16) { sum += merged[i] * merged[i]; n++; }
-            if (Math.sqrt(sum / n) < 0.008) return;
+            if (Math.sqrt(sum / n) < 0.006) return;
 
             captionBusy = true;
             try {
@@ -1553,6 +1609,14 @@ async function renderLiveRoom(session) {
               if (res && res.ok && res.transcript) {
                 const text = res.transcript.replace(/\s+/g, ' ').trim();
                 if (text) {
+                  const normalizedCaption = text.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+                  if (normalizedCaption && normalizedCaption === lastCaptionText) {
+                    repeatedCaptionCount++;
+                    if (repeatedCaptionCount >= 2) return;
+                  } else {
+                    lastCaptionText = normalizedCaption;
+                    repeatedCaptionCount = 0;
+                  }
                   if (firstCaption) { tEl.textContent = ''; firstCaption = false; }
                   liveTranscript += text + ' ';
                   typewriterAppend(text + ' ', tEl);
@@ -1565,19 +1629,19 @@ async function renderLiveRoom(session) {
 
           if (micStatus) micStatus.textContent = 'Recording + live Whisper captions';
         } else if (tEl) {
-          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions off — run the one-click Whisper setup in Settings → AI Tools to enable them.</span>';
+          tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions off - run the one-click Whisper setup in Settings -> AI Tools to enable them.</span>';
         }
       } catch (e) {
         if (tEl) tEl.innerHTML = '<span class="text-zinc-500 text-xs">Live captions unavailable: ' + e.message + '</span>';
       }
 
     } catch (err) {
-      if (micStatus) micStatus.textContent = 'Mic permission failed — notes only';
+      if (micStatus) micStatus.textContent = 'Mic permission failed - notes only';
       showToast('Mic access denied or unavailable. You can still add notes & marks.');
     }
   } else {
     const ms = document.getElementById('mic-status');
-    if (ms) ms.textContent = 'Manual notes mode — no audio/screen recording';
+    if (ms) ms.textContent = 'Manual notes mode - no audio/screen recording';
   }
 
   // (handlers were hoisted early right after timer setup so buttons work immediately;
@@ -1589,7 +1653,7 @@ async function renderDuoSetup(session) {
   const content = document.getElementById('main-content');
   content.innerHTML = `
     <div class="max-w-lg">
-      <div class="mb-4">Duo / Link Mode — ${esc(session.title)}</div>
+      <div class="mb-4">Duo / Link Mode - ${esc(session.title)}</div>
       
       <div class="grid grid-cols-2 gap-4">
         <div class="bg-[#111113] border border-zinc-700 rounded-3xl p-5">
@@ -1652,7 +1716,7 @@ async function renderShareView(content, actionsEl) {
   const status = await window.vibeforge.getPeerStatus();
   let html = `<div class="font-semibold text-xl mb-3">Share</div>`;
 
-  html += `<div class="mb-3 p-3 bg-zinc-900 border border-zinc-800 rounded-2xl text-xs">Jayton clicks Host. Nick opens VibeForge &gt; Share &gt; Join and pastes the address shown here. Both PCs must be on the same local network (WiFi/LAN). Real WebSocket transfer — no cloud.</div>`;
+  html += `<div class="mb-3 p-3 bg-zinc-900 border border-zinc-800 rounded-2xl text-xs">Jayton clicks Host. Nick opens VibeForge &gt; Share &gt; Join and pastes the address shown here. Both PCs must be on the same local network (WiFi/LAN). Real WebSocket transfer - no cloud.</div>`;
 
   if (status.status === 'hosting') {
     html += `<div class="p-3 bg-emerald-950 border border-emerald-700 rounded-3xl mb-3">HOSTING at <span class="font-mono">${status.address || 'local network'}</span>. Tell Nick the address and have him Join.</div>`;
@@ -1698,10 +1762,10 @@ async function renderShareView(content, actionsEl) {
 
     <div class="mt-4 text-xs text-zinc-500 border-t border-zinc-800 pt-3">
       <div class="font-medium mb-1">Windows Firewall / Troubleshooting</div>
-      • If Join fails: allow VibeForge (or node/electron) through Windows Firewall for Private networks.<br>
-      • Use LAN IPs (192.168.x.x or 10.x), not localhost.<br>
-      • Restart both apps after firewall change.<br>
-      • Test with a simple ping first if network is blocked.
+      - If Join fails: allow VibeForge (or node/electron) through Windows Firewall for Private networks.<br>
+      - Use LAN IPs (192.168.x.x or 10.x), not localhost.<br>
+      - Restart both apps after firewall change.<br>
+      - Test with a simple ping first if network is blocked.
     </div>
   `;
 
@@ -1926,7 +1990,7 @@ async function renderIdeasView(content, actionsEl) {
   html += `</div>`;
 
   if (!ideas || !ideas.length) {
-    html += `<div class="empty">No ideas in this filter. Capture fast when you and Nick say “that’s a good idea.”</div>`;
+    html += `<div class="empty">No ideas in this filter. Capture fast when you and Nick say "that's a good idea."</div>`;
   } else {
     html += ideas.map(i => {
       const st = i.status || 'Inbox';
@@ -2054,7 +2118,7 @@ async function renderTimelineView(content) {
   const events = await window.vibeforge.getTimeline(currentProject.id);
   let html = `<div class="font-semibold text-xl mb-4">Timeline</div>`;
   if (!events.length) html += `<div class="empty">No events yet. Create sessions, decisions, tasks or ideas.</div>`;
-  else html += events.map(e => `<div class="py-2 border-b border-zinc-800 text-sm">${new Date(e.timestamp).toLocaleString()} — <span class="text-zinc-400">${esc(e.type)}</span> ${esc(e.title)}</div>`).join('');
+  else html += events.map(e => `<div class="py-2 border-b border-zinc-800 text-sm">${new Date(e.timestamp).toLocaleString()} - <span class="text-zinc-400">${esc(e.type)}</span> ${esc(e.title)}</div>`).join('');
   content.innerHTML = html;
 }
 
@@ -2198,7 +2262,7 @@ async function renderSettingsView(content) {
   let statusHtml = '<div class="text-xs text-zinc-500">Loading storage...</div>';
   try {
     const st = await window.vibeforge.getStorageStatus();
-    statusHtml = `userData: ${st.userData}<br>DB: ${st.dbExists ? Math.round(st.dbSize/1024)+'KB' : 'no'} • ${st.counts.projects} projects`;
+    statusHtml = `userData: ${st.userData}<br>DB: ${st.dbExists ? Math.round(st.dbSize/1024)+'KB' : 'no'} - ${st.counts.projects} projects`;
   } catch(e){ statusHtml = 'Storage info unavailable'; }
 
   // Phone-settings style: top tabs + one clean pane at a time. Very sparse.
@@ -2274,7 +2338,7 @@ async function renderSettingsView(content) {
 
         <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
           <div class="text-lg font-semibold mb-1">Transcription (Whisper, fully local)</div>
-          <div class="text-xs text-zinc-400 mb-3">Powered by whisper.cpp — no Python, no dependencies. One-click setup downloads the engine + speech model (~150 MB, one time). After that: live captions during recording + full transcription of any saved session, all offline.</div>
+          <div class="text-xs text-zinc-400 mb-3">Powered by whisper.cpp - no Python, no dependencies. One-click setup downloads the engine + speech model (~150 MB, one time). After that: live captions during recording + full transcription of any saved session, all offline.</div>
 
           <input id="set-whisper" value="${settings.whisper_path || ''}" placeholder="Engine path (set automatically after setup)" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base mb-2" readonly>
           <div class="flex gap-2 mb-2">
@@ -2314,7 +2378,7 @@ async function renderSettingsView(content) {
 
         <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
           <div class="text-lg font-semibold mb-1">Sign In to GitHub</div>
-          <div class="text-xs text-zinc-400 mb-3">GitHub login (via gh CLI) is persisted on your system — tokens survive app restarts. The app never signs you out; it just queries the current gh status. Once logged in as owner, future builds can publish without re-auth.</div>
+          <div class="text-xs text-zinc-400 mb-3">GitHub login (via gh CLI) is persisted on your system - tokens survive app restarts. The app never signs you out; it just queries the current gh status. Once logged in as owner, future builds can publish without re-auth.</div>
 
           <div class="flex flex-col gap-2">
             <button onclick="doGhSignin(this)" class="w-full py-3 bg-emerald-600 rounded-2xl font-semibold">SIGN IN TO GITHUB</button>
@@ -2426,12 +2490,15 @@ window.switchSettingsTab = async function(tab, btn) {
 };
 
 // === GitHub device sign-in UX (shows the code the user needs to enter on github.com/login/device) ===
-let lastDeviceCode = null;
-
 window.startOllamaServe = async function(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Starting serve...'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
   const res = await window.vibeforge.startOllamaServe();
-  showToast(res && res.ok ? 'ollama serve started (background)' : ('Failed: ' + (res ? res.error : '')));
+  if (res && res.ok) {
+    showToast(res.alreadyRunning ? 'Ollama is already running' : 'Ollama started');
+  } else {
+    showToast('Could not start Ollama: ' + (res ? res.error : 'unknown'));
+  }
+  if (typeof refreshServiceStatus === 'function') refreshServiceStatus();
   if (btn) { btn.disabled = false; btn.textContent = 'Run ollama serve'; }
 };
 
@@ -2446,7 +2513,7 @@ window.openOllama = async function(btn) {
   if (btn) btn.disabled = false;
 };
 
-// === Audio → 16kHz mono WAV conversion (whisper.cpp reads wav natively; webm needs decoding) ===
+// === Audio -> 16kHz mono WAV conversion (whisper.cpp reads wav natively; webm needs decoding) ===
 function encodeWav16k(float32) {
   const sampleRate = 16000;
   const buffer = new ArrayBuffer(44 + float32.length * 2);
@@ -2509,46 +2576,50 @@ function resampleTo16k(float32, fromRate) {
   return out;
 }
 
-window.transcribeSession = async function(sessionId) {
+window.transcribeSession = async function(sessionId, options = {}) {
   const sessions = await window.vibeforge.getSessions(currentProject.id);
   const s = sessions.find(x => x.id === sessionId);
   if (!s || !s.audio_path) return;
   const check = await window.vibeforge.whisperCheck();
   if (!check || !check.configured) {
-    showToast('Whisper not set up yet — one click in Settings > AI Tools (about 150 MB, one time).');
-    switchView('settings');
+    if (!options.silent) {
+      showToast('Whisper not set up yet - one click in Settings > AI Tools (about 150 MB, one time).');
+      switchView('settings');
+    }
     return;
   }
-  showToast('Transcribing locally with Whisper... this can take a bit for long recordings.');
+  if (!options.silent) showToast('Transcribing locally with Whisper... this can take a bit for long recordings.');
   try {
     const bytes = await window.vibeforge.readFileBuffer(s.audio_path);
-    if (!bytes) { showToast('Recording file not found on disk.'); return; }
+    if (!bytes) { if (!options.silent) showToast('Recording file not found on disk.'); return; }
     const wav = await audioBytesToWav16k(bytes);
     const res = await window.vibeforge.transcribeWav({ wav, sessionId, appendToNotes: true });
     if (res && res.ok) {
-      showToast(res.transcript ? 'Transcript added to session notes' : 'Done — no speech detected in the recording');
-      await openSession(sessionId);
+      if (!options.silent) {
+        showToast(res.transcript ? 'Transcript added to session notes' : 'Done - no speech detected in the recording');
+        await openSession(sessionId);
+      }
     } else {
-      showToast('Transcription failed: ' + (res ? res.error : 'unknown'));
+      if (!options.silent) showToast('Transcription failed: ' + (res ? res.error : 'unknown'));
     }
   } catch (e) {
-    showToast('Transcription failed: ' + e.message);
+    if (!options.silent) showToast('Transcription failed: ' + e.message);
   }
 };
 
 window.setupOpenSourceWhisper = async function(btn) {
   const logEl = document.getElementById('whisper-setup-log');
   if (btn) btn.disabled = true;
-  if (logEl) logEl.textContent = 'Setting up Whisper (whisper.cpp engine + speech model, ~150 MB one-time download)...\nNo Python, no dependencies — works offline after this.\n';
+  if (logEl) logEl.textContent = 'Setting up Whisper (whisper.cpp engine + speech model, ~150 MB one-time download)...\nNo Python, no dependencies - works offline after this.\n';
 
   const res = await window.vibeforge.setupOpenSourceWhisper();
   if (res && res.ok) {
     if (logEl) logEl.textContent += res.alreadySetup ? '\nAlready installed and ready.\n' : '\nSetup complete. Transcription + live captions are ready.\n';
-    showToast('Whisper ready — transcription works fully offline now.');
+    showToast('Whisper ready - transcription works fully offline now.');
     setTimeout(() => switchView('settings'), 500);
   } else {
     if (logEl) logEl.textContent += '\nSetup failed: ' + (res ? res.error : 'unknown') + '\nCheck your internet connection and retry.\n';
-    showToast('Whisper setup failed — see the log in AI Tools.');
+    showToast('Whisper setup failed - see the log in AI Tools.');
   }
   if (btn) btn.disabled = false;
 };
@@ -2569,7 +2640,7 @@ setTimeout(async () => {
   try {
     const check = await window.vibeforge.whisperCheck();
     if (!check || !check.configured) {
-      showToast('Tip: enable transcription + live captions with one click in Settings → AI Tools');
+      showToast('Tip: enable transcription + live captions with one click in Settings -> AI Tools');
     }
   } catch (e) {}
 }, 6000);
@@ -2609,14 +2680,14 @@ async function checkAndEnableDevMode() {
         if (ownerInput) ownerInput.value = 'jayton123456789-hub';
         if (repoInput) repoInput.value = 'VibeForge';
 
-        if (statusEl) statusEl.innerHTML += ` <span class="text-emerald-400 font-semibold">— DEV MODE ENABLED (your repo)</span>`;
+        if (statusEl) statusEl.innerHTML += ` <span class="text-emerald-400 font-semibold">- DEV MODE ENABLED (your repo)</span>`;
         if (logEl) logEl.textContent += '\nDEV account detected. Publishing tools active. You can build and release to your GitHub.\n';
 
         // Auto-save the correct repo
         await window.vibeforge.saveSetting('github_owner', 'jayton123456789-hub');
         await window.vibeforge.saveSetting('github_repo', 'VibeForge');
 
-        showToast('DEV mode active — ready to publish builds to your repo.');
+        showToast('DEV mode active - ready to publish builds to your repo.');
         return true;
       } else {
         if (statusEl) statusEl.innerHTML += ` (not the owner account)`;
@@ -2630,7 +2701,7 @@ async function checkAndEnableDevMode() {
   return false;
 }
 
-// Sign in via gh CLI (the one supported flow — token persists in gh's keyring across launches)
+// Sign in via gh CLI (the one supported flow - token persists in gh's keyring across launches)
 window.doGhSignin = async function(btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Opening GitHub login in browser...'; }
   const logEl = document.getElementById('github-signin-log') || document.getElementById('build-log');
@@ -2647,8 +2718,7 @@ window.doGhSignin = async function(btn) {
 };
 
 window.hardResetLocalData = async function() {
-  if (!confirm('Hard reset will wipe the entire VibeForge userData folder (including caches). Continue?')) return;
-  const confirmText = await window.showInputModal('Type HARDRESET to confirm', '', 'Safety check: type HARDRESET exactly');
+  const confirmText = await window.showInputModal('Hard reset local data', '', 'Type HARDRESET exactly to wipe app data and caches');
   if (confirmText !== 'HARDRESET') return;
   await window.vibeforge.resetAllData(); // reuses the strong reset
 };
@@ -2696,11 +2766,11 @@ async function checkOllamaStatus(btn) {
 async function installOllamaFlow() {
   const logEl = document.getElementById('ollama-log');
   if (logEl) logEl.textContent = 'Starting install (winget if available). Watch for UAC / progress window...\n';
-  showToast('Install started — visible process or logs below.');
+  showToast('Install started - visible process or logs below.');
   const r = await window.vibeforge.ollamaInstallAuto();
   if (logEl) logEl.textContent += (r.ok ? 'Install command completed.\n' : ('Install issue: ' + (r.error || r.code) + '\n'));
   if (!r.ok) {
-    showToast('Auto install may need manual step — opened help or use Download button.');
+    showToast('Auto install may need manual step - opened help or use Download button.');
     await window.vibeforge.ollamaOpenDownload();
   } else {
     showToast('Install finished. Re-check Ollama and pull a model.');
@@ -2713,8 +2783,8 @@ async function pullSelectedModel() {
   let model = sel ? sel.value : 'llama3.2';
   if (!model || model.includes('not pulled')) model = await window.showInputModal('Model name to pull', 'llama3.2', 'e.g. llama3.2, phi3:mini, tinyllama');
   if (!model) return;
-  if (logEl) logEl.textContent = `Pulling ${model} (this downloads files — may take time + disk space)...\n`;
-  showToast('Pull started — watch log. Do not close app.');
+  if (logEl) logEl.textContent = `Pulling ${model} (this downloads files - may take time + disk space)...\n`;
+  showToast('Pull started - watch log. Do not close app.');
   const r = await window.vibeforge.ollamaPull(model);
   if (logEl) logEl.textContent += (r.ok ? `Pull complete for ${model}\n` : ('Pull failed: ' + (r.error || r.code) + '\n'));
   if (r.ok) {
@@ -2737,7 +2807,7 @@ async function checkWhisper() {
   const st = document.getElementById('whisper-status');
   const r = await window.vibeforge.whisperCheck();
   if (st) st.textContent = r.configured ? ('Ready: ' + r.path) : ('Not ready: ' + (r.message || 'run the one-click setup'));
-  showToast(r.configured ? 'Whisper is ready (engine + model installed)' : 'Whisper not set up yet — use the one-click setup');
+  showToast(r.configured ? 'Whisper is ready (engine + model installed)' : 'Whisper not set up yet - use the one-click setup');
 }
 
 async function checkForAppUpdates() {
@@ -2770,7 +2840,7 @@ async function checkGhCliStatus(btn) {
   if (btn) btn.textContent = 'Checking...';
   const r = await window.vibeforge.checkGhCli();
   const el = document.getElementById('gh-status');
-  if (el) el.textContent = r.ok ? ('GH CLI: ' + r.version) : ('GH CLI missing — install from https://cli.github.com');
+  if (el) el.textContent = r.ok ? ('GH CLI: ' + r.version) : ('GH CLI missing - install from https://cli.github.com');
   if (btn) btn.textContent = 'Check GitHub CLI Installed';
 }
 
@@ -2786,7 +2856,7 @@ async function doGhSignin(btn) {
   if (btn) btn.textContent = 'Opening...';
   const r = await window.vibeforge.ghSignin();
   const el = document.getElementById('gh-status');
-  if (el) el.textContent = r.fallback ? 'Browser login flow started — complete then re-check' : (r.ok ? 'Login started' : 'See console');
+  if (el) el.textContent = r.fallback ? 'Browser login flow started - complete then re-check' : (r.ok ? 'Login started' : 'See console');
   showToast('GitHub auth flow launched (no password asked inside VibeForge)');
   if (btn) btn.textContent = 'Sign in to GitHub (browser/CLI)';
 }
@@ -2812,7 +2882,7 @@ window.buildPortableRelease = async function(btn) {
   if (r.ok && r.artifact) {
     showToast('Build finished. Ready to publish.');
   } else {
-    showToast('Build problem — check the log box.');
+    showToast('Build problem - check the log box.');
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Build Portable (npm run dist)'; }
 };
@@ -2855,7 +2925,7 @@ window.publishToGitHub = async function(btn) {
     try { (window.vibeforge.ghOpenRepo || window.open)(r.url || `https://github.com/${owner}/${repo}/releases`, '_blank'); } catch(e){}
   } else {
     if (logEl) logEl.textContent += `Failed: ${r ? r.error : 'unknown'}\n`;
-    showToast('Publish failed — see log.');
+    showToast('Publish failed - see log.');
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Publish Release to GitHub'; }
 };
@@ -2879,16 +2949,44 @@ window.saveAllSettings = async function() {
   showToast('Settings saved');
 };
 
+// Pick a model that is actually pulled in Ollama. Prevents the "HTTP 404 model not found"
+// crash when the saved ollama_model setting doesn't match an installed model.
+// Returns { ok, model } or { ok:false, reason: 'offline' | 'no-model' }.
+async function resolveOllamaModel() {
+  const status = await window.vibeforge.ollamaStatus();
+  if (!status || !status.running) return { ok: false, reason: 'offline' };
+  const models = status.models || [];
+  if (models.length === 0) return { ok: false, reason: 'no-model' };
+  const want = (status.model || '').trim();
+  // exact match, or match ignoring the :tag (llama3.2 vs llama3.2:latest)
+  let chosen = models.find(m => m === want)
+    || models.find(m => m.split(':')[0] === want.split(':')[0] && want)
+    || models[0];
+  if (chosen !== want) {
+    try { await window.vibeforge.saveSetting('ollama_model', chosen); } catch (e) {}
+  }
+  return { ok: true, model: chosen };
+}
+
 async function generateFromSession(sessionId, type, btn) {
   const settings = await window.vibeforge.getSettings();
   const ollamaUrl = settings.ollama_url || 'http://127.0.0.1:11434';
-  const model = settings.ollama_model || 'llama3.2';
+  const resolved = await resolveOllamaModel();
   const outputEl = document.getElementById(`gen-output-${sessionId}`);
+  if (!resolved.ok) {
+    const msg = resolved.reason === 'offline'
+      ? 'Ollama is offline — start it in Settings → AI Tools (Run ollama serve).'
+      : 'No Ollama model is pulled yet — pull one in Settings → AI Tools (e.g. llama3.2).';
+    if (outputEl) { outputEl.classList.remove('hidden'); outputEl.innerHTML = `<span class="text-amber-400">${esc(msg)}</span>`; }
+    showToast(msg);
+    const err = new Error(msg); err.handled = true; throw err;
+  }
+  const model = resolved.model;
   if (outputEl) {
     outputEl.classList.remove('hidden');
-    outputEl.innerHTML = 'Generating with Ollama...';
+    outputEl.innerHTML = '<span class="text-zinc-400">Connecting to Ollama...</span>';
   }
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
 
   const sessions = await window.vibeforge.getSessions(currentProject.id);
   const s = sessions.find(x => x.id === sessionId);
@@ -2896,52 +2994,83 @@ async function generateFromSession(sessionId, type, btn) {
   const tasks = await window.vibeforge.getTasksBySession(sessionId);
   const ideas = await window.vibeforge.getIdeasBySession(sessionId);
 
-  let prompt = `Session: ${s.title}\nNotes: ${s.notes || ''}\n`;
-  if (decisions.length) prompt += 'Decisions: ' + decisions.map(d => d.title).join(', ') + '\n';
-  if (tasks.length) prompt += 'Tasks: ' + tasks.map(t => t.title).join(', ') + '\n';
-  if (ideas.length) prompt += 'Ideas: ' + ideas.map(i => i.title).join(', ') + '\n';
+  let prompt = `Session title: ${s.title}\nNotes:\n${s.notes || '(none)'}\n`;
+  if (decisions.length) prompt += '\nDecisions: ' + decisions.map(d => d.title).join(', ');
+  if (tasks.length) prompt += '\nTasks: ' + tasks.map(t => t.title).join(', ');
+  if (ideas.length) prompt += '\nIdeas: ' + ideas.map(i => i.title).join(', ');
 
   let system = 'You are a helpful assistant for creative sessions.';
-  if (type === 'summary') system = 'Provide a concise summary of the session.';
-  else if (type === 'tasks') system = 'Extract and list actionable tasks as bullet points. Return as markdown list.';
-  else if (type === 'decisions') system = 'Extract key decisions made.';
-  else if (type === 'grok') system = 'Create a detailed prompt for Grok to implement features discussed.';
+  if (type === 'summary') {
+    system = 'You are a session assistant. Given session notes, provide: 1) A SHORT_NAME (3-5 words, no quotes, on its own line starting with "SHORT_NAME:"), then 2) A concise summary paragraph. Be direct and useful.';
+  } else if (type === 'tasks') {
+    system = 'Extract actionable tasks from the session. Return ONLY a markdown bullet list (lines starting with "- "). No intro text.';
+  } else if (type === 'decisions') {
+    system = 'Extract key decisions made. Return ONLY a markdown bullet list (lines starting with "- "). No intro text.';
+  } else if (type === 'grok') {
+    system = 'Create a detailed implementation prompt for an AI coding assistant to implement the features discussed. Be specific about what to build.';
+  }
 
   try {
     const res = await fetch(`${ollamaUrl}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: model,
-        prompt: prompt,
-        system: system,
-        stream: false
-      })
+      body: JSON.stringify({ model, prompt, system, stream: false })
     });
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status} - is it running?`);
     const data = await res.json();
-    const output = data.response || 'No output';
-    if (outputEl) outputEl.innerHTML = `<pre class="whitespace-pre-wrap">${output}</pre> <button onclick="copyToClipboard(\`${output.replace(/`/g, '\\`')}\`)" class="text-xs underline">Copy</button>`;
+    const output = (data.response || '').trim();
+    if (!output) throw new Error('No output from model');
 
-    // Save to notes or create items
-    if (type === 'tasks') {
-      // simple parse lines starting with - 
-      const lines = output.split('\n').filter(l => l.trim().startsWith('-')).map(l => l.replace(/^- /, '').trim());
-      for (const line of lines.slice(0, 5)) {
+    if (outputEl) outputEl.innerHTML = `<pre class="whitespace-pre-wrap text-xs">${esc(output)}</pre><button onclick="copyToClipboard(\`${output.replace(/`/g,'\\`').replace(/"/g,'&quot;')}\`)" class="text-xs underline mt-1 inline-block">Copy</button>`;
+
+    if (type === 'summary') {
+      // Extract SHORT_NAME line and auto-rename if session has a generic Quick Record name
+      const nameMatch = output.match(/SHORT_NAME:\s*(.+)/i);
+      if (nameMatch) {
+        const newName = nameMatch[1].trim().replace(/["']/g, '');
+        const isGenericName = /^Quick Record/.test(s.title) || /^Session /.test(s.title);
+        if (isGenericName && newName.length > 2 && newName.length < 80) {
+          await window.vibeforge.updateSessionTitle(sessionId, newName);
+          showToast('Session renamed to: ' + newName);
+        }
+      }
+      // Save summary to notes
+      const summaryText = output.replace(/SHORT_NAME:[^\n]+\n?/i, '').trim();
+      await window.vibeforge.updateSessionNotes(sessionId, (s.notes || '') + '\n\n[AI Summary]\n' + summaryText);
+      showToast('Summary added to notes');
+
+    } else if (type === 'tasks') {
+      const lines = output.split('\n').filter(l => l.trim().startsWith('-')).map(l => l.replace(/^\s*-\s*/, '').trim()).filter(Boolean);
+      for (const line of lines.slice(0, 8)) {
         await window.vibeforge.addTask({ projectId: currentProject.id, sessionId, title: line });
       }
-      showToast('Tasks created from generation');
+      showToast(`${Math.min(lines.length, 8)} tasks created`);
+
     } else if (type === 'decisions') {
-      await window.vibeforge.addDecision({ projectId: currentProject.id, sessionId, title: output.slice(0, 100) });
-      showToast('Decision created');
+      const lines = output.split('\n').filter(l => l.trim().startsWith('-')).map(l => l.replace(/^\s*-\s*/, '').trim()).filter(Boolean);
+      for (const line of lines.slice(0, 5)) {
+        await window.vibeforge.addDecision({ projectId: currentProject.id, sessionId, title: line });
+      }
+      showToast(`${Math.min(lines.length, 5)} decisions created`);
+
     } else {
-      await window.vibeforge.updateSessionNotes(sessionId, (s.notes || '') + '\n\n[Generated ' + type + ']\n' + output);
+      await window.vibeforge.updateSessionNotes(sessionId, (s.notes || '') + '\n\n[' + type + ']\n' + output);
       showToast('Added to notes');
     }
+
+    // Re-render if we're on the session detail page
+    if (document.getElementById(`gen-output-${sessionId}`)) {
+      await openSession(sessionId);
+    }
+
   } catch (e) {
-    if (outputEl) outputEl.innerHTML = 'Ollama error: ' + e.message + '. Check Settings.';
-    showToast('Ollama error');
+    if (e.handled) { if (btn) btn.disabled = false; throw e; } // already shown a friendly message
+    const msg = e.message.includes('fetch') || e.message.includes('Failed') ?
+      'Cannot reach Ollama - is it running? (Settings -> Local AI)' : e.message;
+    if (outputEl) outputEl.innerHTML = `<span class="text-red-400">${esc(msg)}</span>`;
+    showToast('AI error: ' + msg.slice(0, 60));
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -2970,31 +3099,10 @@ async function exportGrokPromptReal(sessionId) {
 async function exportSessionMd(sessionId) { return exportSessionMdReal(sessionId); }
 async function exportGrokPrompt(sessionId) { return exportGrokPromptReal(sessionId); }
 
-async function exportGrokPrompt(sessionId) {
-  const sessions = await window.vibeforge.getSessions(currentProject.id);
-  const s = sessions.find(x => x.id === sessionId);
-  if (!s) return;
-  const decisions = await window.vibeforge.getDecisionsBySession(sessionId);
-  const tasks = await window.vibeforge.getTasksBySession(sessionId);
-
-  let prompt = `You are helping build features from this session:\nTitle: ${s.title}\nNotes: ${s.notes || ''}\n`;
-  if (decisions.length) prompt += 'Decisions: ' + decisions.map(d => d.title).join(', ') + '\n';
-  if (tasks.length) prompt += 'Tasks: ' + tasks.map(t => t.title).join(', ') + '\n';
-  prompt += 'Please implement the discussed features using best practices.';
-
-  const blob = new Blob([prompt], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${s.title.replace(/\s+/g, '_')}_grok_prompt.txt`;
-  a.click();
-  showToast('Exported Grok Prompt');
-}
-
 window.saveSettings = window.saveAllSettings; // compat for any old refs
 
 window.resetAllData = async function() {
-  if (!confirm('Really reset everything?')) return;
-  const confirmText = await window.showInputModal('Type RESET to confirm', '', 'Safety check: type RESET exactly');
+  const confirmText = await window.showInputModal('Reset all data', '', 'Type RESET exactly to wipe local test data');
   if (confirmText !== 'RESET') return;
   await window.vibeforge.resetAllData();
 };
@@ -3008,12 +3116,158 @@ function showToast(msg) {
   setTimeout(() => { t.classList.add('hidden'); t.classList.remove('flex'); }, 2200);
 }
 
+function showSessionProcessingScreen(sessionId, title = 'Processing session', subtitle = 'Saving and preparing your review...') {
+  const content = document.getElementById('main-content');
+  if (!content) return;
+  content.innerHTML = `
+    <div class="min-h-full flex items-center justify-center">
+      <div class="w-full max-w-3xl rounded-[32px] border border-violet-500/30 bg-[#0b0f1d]/95 p-8 shadow-2xl shadow-black/40">
+        <div class="flex items-center gap-5">
+          <div class="relative w-24 h-24 rounded-[28px] bg-violet-500/10 border border-violet-400/30 flex items-center justify-center">
+            <span class="absolute inset-2 rounded-[24px] border border-cyan-400/30 animate-pulse"></span>
+            <i class="fa-solid fa-wand-magic-sparkles text-3xl text-cyan-300"></i>
+          </div>
+          <div>
+            <div id="processing-title" class="text-3xl font-semibold">${esc(title)}</div>
+            <div id="processing-subtitle" class="text-zinc-400 mt-2">${esc(subtitle)}</div>
+          </div>
+        </div>
+        <div class="mt-8 space-y-3 text-sm">
+          <div id="processing-step-save" class="processing-step rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-emerald-200"><i class="fa-solid fa-check mr-2"></i>Recording and notes saved locally</div>
+          <div id="processing-step-transcript" class="processing-step rounded-2xl border border-zinc-700 bg-zinc-950/50 p-4 text-zinc-400"><i class="fa-solid fa-wave-square mr-2"></i>Preparing transcript</div>
+          <div id="processing-step-summary" class="processing-step rounded-2xl border border-zinc-700 bg-zinc-950/50 p-4 text-zinc-400"><i class="fa-solid fa-brain mr-2"></i>Sending notes to Local AI for title and summary</div>
+          <div id="processing-step-items" class="processing-step rounded-2xl border border-zinc-700 bg-zinc-950/50 p-4 text-zinc-400"><i class="fa-solid fa-list-check mr-2"></i>Extracting tasks and decisions</div>
+        </div>
+        <div class="mt-8 h-2 rounded-full bg-zinc-900 overflow-hidden">
+          <div id="processing-progress" class="h-full w-1/4 bg-gradient-to-r from-violet-500 via-cyan-400 to-emerald-400 transition-all duration-300"></div>
+        </div>
+        <div class="mt-4 text-xs text-zinc-500">If Ollama or Whisper is offline, VibeForge will still save everything and tell you what to set up.</div>
+      </div>
+    </div>
+  `;
+}
+
+function updateProcessingStep(step, state, subtitle, progress) {
+  const el = document.getElementById(`processing-step-${step}`);
+  if (el) {
+    el.classList.remove('border-zinc-700', 'bg-zinc-950/50', 'text-zinc-400', 'border-cyan-500/30', 'bg-cyan-500/10', 'text-cyan-200', 'border-emerald-500/30', 'bg-emerald-500/10', 'text-emerald-200', 'border-amber-500/30', 'bg-amber-500/10', 'text-amber-200');
+    if (state === 'active') el.classList.add('border-cyan-500/30', 'bg-cyan-500/10', 'text-cyan-200');
+    else if (state === 'done') el.classList.add('border-emerald-500/30', 'bg-emerald-500/10', 'text-emerald-200');
+    else if (state === 'skip') el.classList.add('border-amber-500/30', 'bg-amber-500/10', 'text-amber-200');
+    else el.classList.add('border-zinc-700', 'bg-zinc-950/50', 'text-zinc-400');
+  }
+  const sub = document.getElementById('processing-subtitle');
+  if (sub && subtitle) sub.textContent = subtitle;
+  const bar = document.getElementById('processing-progress');
+  if (bar && progress) bar.style.width = progress;
+}
+
+async function autoProcessSessionAfterStop(sessionId) {
+  updateProcessingStep('transcript', 'active', 'Checking local Whisper for transcript...', '35%');
+  try {
+    const w = await window.vibeforge.whisperCheck();
+    if (w && w.configured) {
+      await window.transcribeSession(sessionId, { silent: true });
+      updateProcessingStep('transcript', 'done', 'Transcript saved. Checking Local AI...', '55%');
+    } else {
+      updateProcessingStep('transcript', 'skip', 'Whisper is not set up yet. Recording is saved; transcript can run later.', '50%');
+    }
+  } catch (e) {
+    updateProcessingStep('transcript', 'skip', 'Transcript skipped: ' + (e.message || e), '50%');
+  }
+
+  updateProcessingStep('summary', 'active', 'Checking Ollama and creating a smart title + summary...', '65%');
+  const resolved = await resolveOllamaModel();
+  if (!resolved.ok) {
+    const why = resolved.reason === 'offline'
+      ? 'Ollama is offline. Everything is saved — run AI Cleanup later, or start Ollama in Settings → AI Tools.'
+      : 'No Ollama model is pulled yet. Everything is saved — pull a model in Settings → AI Tools, then run AI Cleanup.';
+    updateProcessingStep('summary', 'skip', why, '85%');
+    updateProcessingStep('items', 'skip', 'Tasks & decisions need a local model — skipped for now.', '100%');
+    await new Promise(r => setTimeout(r, 1200));
+    return;
+  }
+  try {
+    await generateFromSession(sessionId, 'summary', null);
+    updateProcessingStep('summary', 'done', 'Summary saved. Extracting tasks and decisions...', '80%');
+    updateProcessingStep('items', 'active', 'Extracting tasks and decisions...', '88%');
+    await generateFromSession(sessionId, 'tasks', null);
+    await generateFromSession(sessionId, 'decisions', null);
+    updateProcessingStep('items', 'done', 'AI cleanup complete. Opening review...', '100%');
+    await new Promise(r => setTimeout(r, 600));
+  } catch (e) {
+    updateProcessingStep('summary', 'skip', 'AI cleanup skipped: ' + (e.message || e), '100%');
+    await new Promise(r => setTimeout(r, 900));
+  }
+}
+
+// Processing bubble shown in bottom-right after Stop & Save
+function showProcessingBubble(sessionId) {
+  // Remove any existing bubble
+  const existing = document.getElementById('processing-bubble');
+  if (existing) existing.remove();
+
+  const bubble = document.createElement('div');
+  bubble.id = 'processing-bubble';
+  bubble.style.cssText = 'position:fixed;bottom:80px;right:24px;z-index:999;background:#111113;border:1px solid #3b3b42;border-radius:20px;padding:12px 18px;display:flex;align-items:center;gap:10px;font-size:13px;color:#e4e4e7;box-shadow:0 8px 32px rgba(0,0,0,0.5);max-width:280px;';
+  bubble.innerHTML = `
+    <span style="width:18px;height:18px;border-radius:50%;border:2px solid #6366f1;border-top-color:transparent;display:inline-block;animation:bubbleSpin 0.7s linear infinite;flex-shrink:0"></span>
+    <div><div style="font-weight:500">Finishing up...</div><div style="font-size:11px;color:#71717a">Saving session &amp; notes</div></div>
+  `;
+  if (!document.getElementById('bubble-spin-style')) {
+    const s = document.createElement('style');
+    s.id = 'bubble-spin-style';
+    s.textContent = '@keyframes bubbleSpin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(s);
+  }
+  document.body.appendChild(bubble);
+
+  // Auto-dismiss after 4s
+  setTimeout(() => {
+    if (bubble.parentNode) {
+      bubble.innerHTML = `<span style="font-size:16px">&#10003;</span><div><div style="font-weight:500">Session saved</div><div style="font-size:11px;color:#71717a">Ready to review</div></div>`;
+      bubble.style.borderColor = '#10b981';
+      setTimeout(() => { if (bubble.parentNode) bubble.remove(); }, 2000);
+    }
+  }, 2500);
+}
+
 async function updateActiveNav() {
   // Already handled in switchView
 }
 
+// === Live service status dots (top bar) ===
+// green = ready to use, amber = running but needs a step, gray = off/not set up.
+async function refreshServiceStatus() {
+  const setDot = (id, color, tip) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const map = { green: '#22c55e', amber: '#f59e0b', gray: '#52525b' };
+    el.style.backgroundColor = map[color] || map.gray;
+    el.style.boxShadow = color === 'green' ? '0 0 6px #22c55e' : 'none';
+    if (el.parentElement) el.parentElement.title = tip;
+  };
+  try {
+    const o = await window.vibeforge.ollamaStatus();
+    if (!o || !o.running) setDot('dot-ollama', 'gray', 'Ollama: offline — click to start it in AI Tools');
+    else if (!o.models || o.models.length === 0) setDot('dot-ollama', 'amber', 'Ollama: running, but no model pulled — click to pull one');
+    else setDot('dot-ollama', 'green', `Ollama: ready (${o.models.length} model${o.models.length>1?'s':''})`);
+  } catch (e) { setDot('dot-ollama', 'gray', 'Ollama: offline'); }
+  try {
+    const w = await window.vibeforge.whisperStatus();
+    if (w && w.ready) setDot('dot-whisper', 'green', 'Whisper: ready (transcription + live captions)');
+    else setDot('dot-whisper', 'gray', 'Whisper: not set up — click to install in AI Tools');
+  } catch (e) { setDot('dot-whisper', 'gray', 'Whisper: not set up'); }
+}
+
 // Boot
 window.onload = init;
+
+// Start status polling once the DOM is ready
+setTimeout(() => {
+  refreshServiceStatus();
+  setInterval(refreshServiceStatus, 5000);
+}, 800);
 
 // Show + wire the big green update banner (used by both auto-on-launch and manual CHECK FOR UPDATE).
 // Replaces content so the button always gets a real working onclick (fixes "click does nothing").
@@ -3022,7 +3276,7 @@ function showUpdateBanner(latest) {
   if (!updateBanner) return;
   updateBanner.classList.remove('hidden');
   updateBanner.classList.add('flex');
-  updateBanner.innerHTML = `<div><span class="font-semibold">UPDATE AVAILABLE: ${latest || ''}</span> — WANNA RELOAD?</div>
+  updateBanner.innerHTML = `<div><span class="font-semibold">UPDATE AVAILABLE: ${latest || ''}</span> - WANNA RELOAD?</div>
     <button id="do-update-btn" class="bg-white text-emerald-700 font-semibold px-5 py-1.5 rounded-xl active:scale-95">YES, DOWNLOAD &amp; RELOAD</button>`;
   const btn = document.getElementById('do-update-btn');
   if (btn) {

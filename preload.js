@@ -62,12 +62,11 @@ const api = {
   getPeerStatus: () => ipcRenderer.invoke('get-peer-status'),
   peerSendFile: (filePath) => ipcRenderer.invoke('peer-send-file', filePath),
   peerSendText: (text) => ipcRenderer.invoke('peer-send-text', text),
-  onPeerFile: (cb) => { ipcRenderer.on('peer-file', (_e, data) => cb(data)); },
-  onPeerMessage: (cb) => { ipcRenderer.on('peer-message', (_e, data) => cb(data)); },
+  onPeerFile: (cb) => { ipcRenderer.removeAllListeners('peer-file'); ipcRenderer.on('peer-file', (_e, data) => cb(data)); },
 
   // Listen for peer updates from main
-  onPeerStatus: (cb) => ipcRenderer.on('peer-status', (e, data) => cb(data)),
-  onPeerMessage: (cb) => ipcRenderer.on('peer-message', (e, data) => cb(data)),
+  onPeerStatus: (cb) => { ipcRenderer.removeAllListeners('peer-status'); ipcRenderer.on('peer-status', (e, data) => cb(data)); },
+  onPeerMessage: (cb) => { ipcRenderer.removeAllListeners('peer-message'); ipcRenderer.on('peer-message', (e, data) => cb(data)); },
 
   // New real QOL APIs
   updateIdea: (data) => ipcRenderer.invoke('update-idea', data),
@@ -81,11 +80,14 @@ const api = {
   revealRecordings: () => ipcRenderer.invoke('reveal-recordings'),
 
   ollamaCheck: () => ipcRenderer.invoke('ollama-check'),
+  ollamaStatus: () => ipcRenderer.invoke('ollama-status'),
+  whisperStatus: () => ipcRenderer.invoke('whisper-status'),
   ollamaOpenDownload: () => ipcRenderer.invoke('ollama-open-download'),
   ollamaInstallAuto: () => ipcRenderer.invoke('ollama-install-auto'),
   ollamaPull: (model) => ipcRenderer.invoke('ollama-pull', model),
   ollamaListModels: () => ipcRenderer.invoke('ollama-list-models'),
   ollamaTestModel: (model) => ipcRenderer.invoke('ollama-test-model', model),
+  getSessionRecordings: (sessionId) => ipcRenderer.invoke('get-session-recordings', sessionId),
 
   checkGit: () => ipcRenderer.invoke('check-git'),
   checkGhCli: () => ipcRenderer.invoke('check-gh-cli'),
@@ -93,10 +95,6 @@ const api = {
   getGithubUser: () => ipcRenderer.invoke('get-github-user'),
   ghSignin: () => ipcRenderer.invoke('gh-signin'),
   ghRun: (args) => ipcRenderer.invoke('gh-run', args),
-  startGithubDeviceSignin: () => ipcRenderer.invoke('start-github-device-signin'),
-  githubPollDeviceToken: (data) => ipcRenderer.invoke('github-poll-device-token', data),
-  githubGetUserWithToken: (data) => ipcRenderer.invoke('github-get-user-with-token', data),
-  githubPublishWithToken: (data) => ipcRenderer.invoke('github-publish-with-token', data),
   ghOpenRepo: (data) => ipcRenderer.invoke('gh-open-repo', data),
   checkAppUpdate: (data) => ipcRenderer.invoke('check-app-update', data),
 
@@ -111,7 +109,6 @@ const api = {
   publishRelease: (data) => ipcRenderer.invoke('publish-release', data),
   revealDist: () => ipcRenderer.invoke('reveal-dist'),
   onBuildLog: (cb) => ipcRenderer.on('build-log', (_e, line) => cb(line)),
-  onGithubDeviceCode: (cb) => ipcRenderer.on('github-device-code', (_e, data) => cb(data)),
   onGithubSigninLog: (cb) => ipcRenderer.on('github-signin-log', (_e, line) => cb(line)),
   onGithubSigninDone: (cb) => ipcRenderer.on('github-signin-done', (_e, data) => cb(data)),
   onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_e, data) => cb(data)),
@@ -121,7 +118,8 @@ const api = {
   transcribeWav: (data) => ipcRenderer.invoke('transcribe-wav', data),
   readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   setupOpenSourceWhisper: () => ipcRenderer.invoke('setup-open-source-whisper'),
-  onWhisperSetupLog: (cb) => ipcRenderer.on('whisper-setup-log', (_e, line) => cb(line))
+  onWhisperSetupLog: (cb) => ipcRenderer.on('whisper-setup-log', (_e, line) => cb(line)),
+  getScreenSources: () => ipcRenderer.invoke('get-screen-sources')
 };
 
 contextBridge.exposeInMainWorld('vibeforge', api);
