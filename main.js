@@ -327,10 +327,10 @@ function registerIpc() {
     return db.prepare('SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at DESC').all(projectId);
   });
 
-  ipcMain.handle('create-session', (e, { projectId, title, mode }) => {
+  ipcMain.handle('create-session', (e, { projectId, title, mode, startedAt }) => {
     if (!title || !title.trim()) throw new Error('Session name required');
     const id = uuidv4();
-    const now = Date.now();
+    const now = (typeof startedAt === 'number' && startedAt > 0) ? startedAt : Date.now();
     db.prepare(`
       INSERT INTO sessions (id, project_id, title, mode, started_at) 
       VALUES (?, ?, ?, ?, ?)
