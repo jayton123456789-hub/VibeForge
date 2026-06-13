@@ -492,6 +492,23 @@ async function openSession(id) {
   const hasAiOutput = Boolean(aiSummary || tasks.length || decisions.length || ideas.length);
   const mediaName = s.audio_path ? s.audio_path.split(/[\\/]/).pop() : '';
 
+  // Highlights = every [MM:SS] mark/clip you dropped during recording, parsed into a
+  // clickable reel. Clicking one jumps the recording to that exact moment.
+  const highlights = [];
+  const hlRe = /^\[(\d{1,2}):(\d{2})\]\s*(.+)$/gm;
+  let hlm;
+  while ((hlm = hlRe.exec(rawNotes)) !== null) {
+    const secs = parseInt(hlm[1], 10) * 60 + parseInt(hlm[2], 10);
+    let txt = hlm[3].trim();
+    let kind = 'note';
+    if (/^Clip this moment/i.test(txt)) { kind = 'clip'; txt = 'Clip'; }
+    else if (/^Marked decision:/i.test(txt)) { kind = 'decision'; txt = txt.replace(/^Marked decision:\s*/i, ''); }
+    else if (/^Marked task:/i.test(txt)) { kind = 'task'; txt = txt.replace(/^Marked task:\s*/i, ''); }
+    else if (/^Marked idea:/i.test(txt)) { kind = 'idea'; txt = txt.replace(/^Marked idea:\s*/i, ''); }
+    highlights.push({ time: hlm[1] + ':' + hlm[2], secs, txt, kind });
+  }
+  const hlIcon = { clip: 'fa-scissors text-emerald-300', decision: 'fa-gavel text-blue-300', task: 'fa-list-check text-cyan-300', idea: 'fa-lightbulb text-amber-300', note: 'fa-bookmark text-zinc-300' };
+
   const content = document.getElementById('main-content');
   content.innerHTML = `
     <div class="min-h-full grid 2xl:grid-cols-[1fr_320px] gap-4">
@@ -522,11 +539,24 @@ async function openSession(id) {
         </div>
 
         <div class="p-5">
-          <div class="rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-4 gap-2 mb-4">
-            <button id="review-tab-summary" onclick="switchSessionReviewTab('${s.id}', 'summary')" class="px-4 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Summary</button>
-            <button id="review-tab-transcript" onclick="switchSessionReviewTab('${s.id}', 'transcript')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-align-left"></i> Transcript</button>
-            <button id="review-tab-notes" onclick="switchSessionReviewTab('${s.id}', 'notes')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sticky-note"></i> Notes</button>
-            <button id="review-tab-artifacts" onclick="switchSessionReviewTab('${s.id}', 'artifacts')" class="px-4 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-layer-group"></i> Items</button>
+          <div class="rounded-2xl border border-zinc-700/70 bg-[#141728]/80 p-2 grid grid-cols-5 gap-2 mb-4">
+            <button id="review-tab-summary" onclick="switchSessionReviewTab('${s.id}', 'summary')" class="px-3 py-3 rounded-xl bg-indigo-600/40 border border-indigo-500/40 text-indigo-100 flex items-center justify-center gap-2"><i class="fa-solid fa-sparkles"></i> Summary</button>
+            <button id="review-tab-highlights" onclick="switchSessionReviewTab('${s.id}', 'highlights')" class="px-3 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-star"></i> Highlights${highlights.length ? ` <span class="text-[10px] px-1.5 rounded-full bg-amber-500/20 text-amber-300">${highlights.length}</span>` : ''}</button>
+            <button id="review-tab-transcript" onclick="switchSessionReviewTab('${s.id}', 'transcript')" class="px-3 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-align-left"></i> Transcript</button>
+            <button id="review-tab-notes" onclick="switchSessionReviewTab('${s.id}', 'notes')" class="px-3 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-sticky-note"></i> Notes</button>
+            <button id="review-tab-artifacts" onclick="switchSessionReviewTab('${s.id}', 'artifacts')" class="px-3 py-3 rounded-xl hover:bg-zinc-800 text-zinc-300 flex items-center justify-center gap-2"><i class="fa-solid fa-layer-group"></i> Items</button>
+          </div>
+
+          <div id="review-panel-highlights" style="display:none" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
+            <div class="mb-4"><div class="font-semibold text-lg">Highlights</div><div class="text-sm text-zinc-500">Every moment you marked or clipped, in order. Click one to jump the recording straight there.</div></div>
+            ${highlights.length ? `<div class="space-y-2">${highlights.map(h => `
+              <button onclick="seekRecording(${h.secs})" class="w-full text-left flex items-center gap-3 rounded-2xl border border-zinc-700/70 bg-zinc-950/50 hover:border-amber-400/50 hover:bg-amber-500/5 px-4 py-3 transition">
+                <i class="fa-solid ${hlIcon[h.kind] || hlIcon.note} w-5 text-center"></i>
+                <span class="font-mono text-sm text-amber-300 w-14">${h.time}</span>
+                <span class="text-sm text-zinc-200 flex-1">${esc(h.txt)}</span>
+                <i class="fa-solid fa-play text-xs text-zinc-500"></i>
+              </button>`).join('')}</div>`
+            : `<div class="rounded-2xl border border-dashed border-zinc-700 p-8 text-center text-sm text-zinc-500">No highlights yet. While recording, hit <span class="text-emerald-300">Clip</span> or Mark Decision/Task/Idea to drop a marker — they'll show here as a clickable reel into the recording.</div>`}
           </div>
 
           <div id="review-panel-summary" class="rounded-[24px] border border-zinc-700/70 bg-black/25 p-5 min-h-[320px]">
@@ -579,8 +609,8 @@ async function openSession(id) {
 
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
           <div class="font-semibold mb-3">Recording</div>
-          ${s.audio_path ? `<audio controls src="file://${s.audio_path}" class="w-full" style="height:38px"></audio><div class="mt-2 text-xs text-zinc-500 truncate">${esc(mediaName)}</div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
-          ${s.screen_path ? `<div class="mt-4 text-xs text-zinc-400 mb-1"><i class="fa-solid fa-desktop mr-1"></i>Screen capture</div><video controls src="file://${s.screen_path}" class="w-full rounded-xl bg-black max-h-64"></video>` : ''}
+          ${s.audio_path ? `<audio id="session-audio" controls src="file://${s.audio_path}" class="w-full" style="height:38px"></audio><div class="mt-2 text-xs text-zinc-500 truncate">${esc(mediaName)}</div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
+          ${s.screen_path ? `<div class="mt-4 text-xs text-zinc-400 mb-1"><i class="fa-solid fa-desktop mr-1"></i>Screen capture</div><video id="session-screen" controls src="file://${s.screen_path}" class="w-full rounded-xl bg-black max-h-64"></video>` : ''}
         </div>
 
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
@@ -624,7 +654,7 @@ async function saveSessionNotes(id) {
 }
 
 window.switchSessionReviewTab = function(sessionId, tab) {
-  const tabs = ['summary', 'transcript', 'notes', 'artifacts'];
+  const tabs = ['summary', 'highlights', 'transcript', 'notes', 'artifacts'];
   for (const name of tabs) {
     const panel = document.getElementById(`review-panel-${name}`);
     const btn = document.getElementById(`review-tab-${name}`);
@@ -639,6 +669,23 @@ window.switchSessionReviewTab = function(sessionId, tab) {
       btn.classList.toggle('text-zinc-300', !active);
     }
   }
+};
+
+// Jump the session recording (audio + screen) to a highlight's timestamp and play.
+window.seekRecording = function(seconds) {
+  const a = document.getElementById('session-audio');
+  const v = document.getElementById('session-screen');
+  let seeked = false;
+  for (const el of [a, v]) {
+    if (!el) continue;
+    try {
+      el.currentTime = seconds;
+      const p = el.play(); if (p && p.catch) p.catch(() => {});
+      seeked = true;
+    } catch (e) {}
+  }
+  if (a) { try { a.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {} }
+  showToast(seeked ? `Jumped to ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}` : 'No recording to seek');
 };
 
 window.runSessionAiCleanup = async function(sessionId, btn) {
