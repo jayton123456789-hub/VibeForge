@@ -1456,6 +1456,38 @@ function registerIpc() {
   });
 
   // Save setting already exists; whisper_path can be saved via save-setting
+
+  // ── First-run setup IPC (used by splash-preload.js) ───────────────────────
+  ipcMain.handle('splash-check-first-run', () => {
+    return { firstRun: isFirstRun() };
+  });
+
+  ipcMain.handle('splash-run-setup', async () => {
+    // Run async — the splash window listens for streamed events.
+    // We don't await here; the splash drives itself via setup-step / setup-done events.
+    runFirstRunSetup().then(() => {
+      // After setup finishes (including the brief done-screen pause), open the main window.
+      // createWindow may have already been called — if mainWindow exists, just close the splash.
+      if (!mainWindow) {
+        createWindow();
+      } else {
+        closeSplash();
+      }
+    }).catch((err) => {
+      console.error('First-run setup error:', err);
+      markFirstRunComplete(); // don't loop on error
+      if (!mainWindow) createWindow();
+      else closeSplash();
+    });
+    return { ok: true };
+  });
+
+  ipcMain.handle('splash-skip-setup', () => {
+    markFirstRunComplete();
+    if (!mainWindow) createWindow();
+    else closeSplash();
+    return { ok: true };
+  });
 }
 
 function addTimeline(projectId, type, title, timestamp) {
@@ -1479,14 +1511,185 @@ function getLocalIP() {
 }
 
 let splashWindow = null;
+
+// ─── First-run setup ──────────────────────────────────────────────────────────
+// Sends step events to the splash window during first-run dependency installation.
+function splashStep(stepId, state, log) {
+  if (splashWindow && splashWindow.webContents) {
+    splashWindow.webContents.send('setup-step', { stepId, state, log });
+  }
+}
+function splashDone() {
+  if (splashWindow && splashWindow.webContents) {
+    splashWindow.webContents.send('setup-done', {});
+  }
+}
+
+function isFirstRun() {
+  if (!db) return false;
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('first_run_complete');
+  return !row || row.value !== '1';
+}
+
+function markFirstRunComplete() {
+  if (db) db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('first_run_complete', '1');
+}
+
+// Runs the full first-run setup pipeline asynchronously, streaming progress to the splash.
+async function runFirstRunSetup() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ── Step 1: check existing dependencies ──────────────────────────────────
+  splashStep('deps', 'active', 'Checking existing installation…\n');
+  await sleep(400);
+
+  const ollamaUrl = getSetting('ollama_url') || 'http://127.0.0.1:11434';
+
+  // Check if Ollama binary is present
+  const ollamaInstalled = await new Promise(r => exec('ollama --version', e => r(!e)));
+  // Check if Ollama server is already up
+  let ollamaRunning = false;
+  try {
+    const r = await fetch(`${ollamaUrl}/api/tags`).catch(() => null);
+    ollamaRunning = !!(r && r.ok);
+  } catch (e) {}
+  // Check if preferred model is already pulled
+  const preferredModel = getSetting('ollama_model') || 'llama3.2';
+  let modelPulled = false;
+  if (ollamaRunning) {
+    try {
+      const r = await fetch(`${ollamaUrl}/api/tags`);
+      const data = await r.json();
+      modelPulled = (data.models || []).some(m => m.name && m.name.startsWith(preferredModel));
+    } catch (e) {}
+  }
+  // Check Whisper
+  const whisperCli = findWhisperCli();
+  const whisperModel = getWhisperModelPath();
+  const whisperReady = !!(whisperCli && fs.existsSync(whisperModel));
+
+  splashStep('deps', 'done', `Ollama installed: ${ollamaInstalled}, running: ${ollamaRunning}, model ready: ${modelPulled}, Whisper ready: ${whisperReady}\n`);
+  await sleep(300);
+
+  // ── Step 2: install Ollama if missing ────────────────────────────────────
+  if (!ollamaInstalled) {
+    splashStep('ollama', 'active', 'Ollama not found — installing via winget…\n');
+    const installResult = await new Promise((resolve) => {
+      const proc = spawn('winget', ['install', '--id', 'Ollama.Ollama', '-e',
+        '--accept-package-agreements', '--accept-source-agreements'],
+        { shell: true, windowsHide: true });
+      proc.stdout.on('data', d => splashStep('ollama', 'active', d.toString()));
+      proc.stderr.on('data', d => splashStep('ollama', 'active', d.toString()));
+      proc.on('close', code => resolve({ ok: code === 0, code }));
+      proc.on('error', err => resolve({ ok: false, error: err.message }));
+    });
+    if (installResult.ok) {
+      splashStep('ollama', 'done', 'Ollama installed successfully.\n');
+    } else {
+      splashStep('ollama', 'error', `Ollama install failed (code ${installResult.code}). You can install it manually later from ollama.com\n`);
+    }
+  } else {
+    splashStep('ollama', 'done', 'Ollama already installed — skipping.\n');
+  }
+  await sleep(200);
+
+  // ── Step 3: start Ollama serve + pull model ───────────────────────────────
+  if (!ollamaRunning) {
+    splashStep('model', 'active', 'Starting Ollama server…\n');
+    const exe = getOllamaExe();
+    try {
+      const proc = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+      proc.on('error', () => {});
+      proc.unref();
+      await sleep(2000);
+    } catch (e) {
+      splashStep('model', 'active', `Could not start Ollama: ${e.message}\n`);
+    }
+  }
+
+  if (!modelPulled) {
+    splashStep('model', 'active', `Pulling model ${preferredModel} (this may take a while for first pull)…\n`);
+    const pullResult = await new Promise((resolve) => {
+      const exe = getOllamaExe();
+      const proc = spawn(exe, ['pull', preferredModel], { shell: false, windowsHide: true });
+      proc.stdout.on('data', d => splashStep('model', 'active', d.toString()));
+      proc.stderr.on('data', d => splashStep('model', 'active', d.toString()));
+      proc.on('close', code => resolve({ ok: code === 0 }));
+      proc.on('error', err => resolve({ ok: false, error: err.message }));
+    });
+    splashStep('model', pullResult.ok ? 'done' : 'error',
+      pullResult.ok ? `Model ${preferredModel} ready.\n` : `Model pull failed — you can pull it later in Settings.\n`);
+  } else {
+    splashStep('model', 'done', `Model ${preferredModel} already present — skipping.\n`);
+  }
+  await sleep(200);
+
+  // ── Step 4: Whisper setup ────────────────────────────────────────────────
+  if (!whisperReady) {
+    splashStep('whisper', 'active', 'Installing Whisper speech-to-text engine…\n');
+    const whisperDir = getWhisperDir();
+    const modelPath = getWhisperModelPath();
+    let cli = findWhisperCli();
+    let ok = true;
+    try {
+      if (!fs.existsSync(whisperDir)) fs.mkdirSync(whisperDir, { recursive: true });
+      if (!cli) {
+        splashStep('whisper', 'active', 'Downloading whisper.cpp engine (~4 MB)…\n');
+        const zipPath = path.join(whisperDir, 'whisper-bin-x64.zip');
+        await downloadFile(WHISPER_BIN_URL, zipPath, pct => {
+          if (pct % 20 === 0) splashStep('whisper', 'active', `  engine: ${pct}%\n`);
+        });
+        splashStep('whisper', 'active', 'Extracting…\n');
+        await new Promise((res, rej) => {
+          const p = spawn('powershell', ['-NoProfile', '-Command',
+            `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${whisperDir}' -Force`],
+            { windowsHide: true });
+          p.on('close', c => c === 0 ? res() : rej(new Error('zip extract failed')));
+          p.on('error', rej);
+        });
+        try { fs.unlinkSync(zipPath); } catch (e) {}
+        cli = findWhisperCli();
+        if (!cli) throw new Error('whisper-cli.exe not found after extraction');
+      }
+      if (!fs.existsSync(modelPath)) {
+        splashStep('whisper', 'active', 'Downloading speech model (~142 MB)…\n');
+        await downloadFile(WHISPER_MODEL_URL, modelPath, pct => {
+          if (pct % 10 === 0) splashStep('whisper', 'active', `  model: ${pct}%\n`);
+        });
+      }
+      setSetting('whisper_path', cli);
+      setSetting('whisper_model', modelPath);
+    } catch (err) {
+      ok = false;
+      splashStep('whisper', 'error', `Whisper setup failed: ${err.message}\n`);
+    }
+    if (ok) splashStep('whisper', 'done', 'Whisper ready — transcription works offline.\n');
+  } else {
+    splashStep('whisper', 'done', 'Whisper already installed — skipping.\n');
+  }
+  await sleep(200);
+
+  // ── Step 5: done ─────────────────────────────────────────────────────────
+  splashStep('done', 'done', 'All done!\n');
+  markFirstRunComplete();
+  await sleep(800);
+  splashDone();
+  // Give the user a moment to see the ✅ before the main window opens
+  await sleep(1800);
+}
+
 function createSplash() {
   if (isUpdateMode) return;
   try {
     splashWindow = new BrowserWindow({
-      width: 380, height: 300, frame: false, transparent: true, resizable: false,
+      width: 420, height: 460, frame: false, transparent: true, resizable: false,
       center: true, alwaysOnTop: true, skipTaskbar: true, show: false,
       backgroundColor: '#00000000',
-      webPreferences: { contextIsolation: true, nodeIntegration: false }
+      webPreferences: {
+        preload: path.join(__dirname, 'src/splash-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false
+      }
     });
     splashWindow.loadFile(path.join(__dirname, 'src/splash.html'));
     splashWindow.once('ready-to-show', () => { if (splashWindow) splashWindow.show(); });
@@ -1550,8 +1753,9 @@ function createWindow() {
   });
 
   // Safety net: never leave the splash orphaned if the main window errors out.
+  // Use a long timeout (10 min) so the splash can survive a first-run model download.
   mainWindow.webContents.on('did-fail-load', () => closeSplash());
-  setTimeout(closeSplash, 20000);
+  setTimeout(closeSplash, 600000);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -1615,7 +1819,13 @@ app.whenReady().then(() => {
 
   registerIpc();
   if (!isUpdateMode) {
-    createWindow();
+    // First-run: keep the splash open as the setup wizard; it will call createWindow() when done.
+    // Normal launch: createWindow() immediately (splash closes when main window is ready-to-show).
+    if (!isFirstRun()) {
+      createWindow();
+    }
+    // If first-run, the splash's splashBridge.runSetup() → 'splash-run-setup' IPC → runFirstRunSetup()
+    // → createWindow() chain handles it.
   }
   // Note: update mode process is headless replacer (scheduled above), no window.
 

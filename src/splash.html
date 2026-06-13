@@ -3,27 +3,233 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
-      font-family: system-ui, -apple-system, sans-serif; -webkit-user-select: none; }
-    .card {
-      height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 18px; background: radial-gradient(120% 120% at 50% 0%, #14182b 0%, #0a0a0b 70%);
-      border: 1px solid rgba(148,163,184,.15); border-radius: 20px;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; background: transparent; overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+      -webkit-user-select: none; color: #e5e7eb;
     }
-    .logo { width: 76px; height: 76px; border-radius: 18px; box-shadow: 0 12px 40px rgba(99,102,241,.35); }
-    .name { color: #e5e7eb; font-size: 26px; font-weight: 700; letter-spacing: .5px; }
-    .sub { color: #6b7280; font-size: 12px; margin-top: -8px; }
-    .spin { width: 26px; height: 26px; border-radius: 50%;
-      border: 3px solid rgba(148,163,184,.25); border-top-color: #6366f1; animation: s .7s linear infinite; }
+    .card {
+      height: 100vh; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 0;
+      background: radial-gradient(120% 120% at 50% 0%, #14182b 0%, #0a0a0b 70%);
+      border: 1px solid rgba(148,163,184,.15); border-radius: 20px;
+      padding: 32px 28px; position: relative; overflow: hidden;
+    }
+
+    /* === Normal splash (fast launch) === */
+    #normal-splash {
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
+    }
+    .logo { width: 72px; height: 72px; border-radius: 18px; box-shadow: 0 12px 40px rgba(99,102,241,.35); }
+    .name { color: #e5e7eb; font-size: 26px; font-weight: 700; letter-spacing: .5px; margin-top: 2px; }
+    .sub  { color: #6b7280; font-size: 12px; }
+    .spin { width: 24px; height: 24px; border-radius: 50%;
+      border: 3px solid rgba(148,163,184,.2); border-top-color: #6366f1;
+      animation: s .75s linear infinite; }
     @keyframes s { to { transform: rotate(360deg); } }
+
+    /* === First-run setup wizard === */
+    #setup-splash {
+      display: none; flex-direction: column; align-items: center; width: 100%; gap: 0;
+    }
+    .setup-logo { width: 52px; height: 52px; border-radius: 14px; box-shadow: 0 8px 28px rgba(99,102,241,.35); margin-bottom: 10px; }
+    .setup-title { font-size: 20px; font-weight: 700; color: #e5e7eb; margin-bottom: 2px; }
+    .setup-tagline { font-size: 11.5px; color: #6b7280; margin-bottom: 18px; }
+
+    /* Progress bar */
+    .progress-track {
+      width: 100%; height: 4px; background: rgba(148,163,184,.12); border-radius: 2px; margin-bottom: 16px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6);
+      border-radius: 2px; width: 0%; transition: width .5s ease;
+    }
+
+    /* Step list */
+    .steps { width: 100%; display: flex; flex-direction: column; gap: 7px; margin-bottom: 16px; }
+    .step {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px; border-radius: 9px;
+      background: rgba(255,255,255,.03); border: 1px solid rgba(148,163,184,.08);
+      transition: background .3s, border-color .3s;
+    }
+    .step.active  { background: rgba(99,102,241,.12); border-color: rgba(99,102,241,.3); }
+    .step.done    { background: rgba(34,197,94,.07); border-color: rgba(34,197,94,.2); }
+    .step.error   { background: rgba(239,68,68,.07); border-color: rgba(239,68,68,.2); }
+    .step-icon { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }
+    .step.pending .step-icon { background: rgba(148,163,184,.1); color: #6b7280; }
+    .step.active  .step-icon { background: rgba(99,102,241,.2); }
+    .step.done    .step-icon { background: rgba(34,197,94,.15); color: #22c55e; }
+    .step.error   .step-icon { background: rgba(239,68,68,.15); color: #ef4444; }
+    .step-spin { width: 14px; height: 14px; border-radius: 50%;
+      border: 2px solid rgba(99,102,241,.3); border-top-color: #6366f1;
+      animation: s .75s linear infinite; }
+    .step-label { flex: 1; font-size: 12px; font-weight: 500; color: #cbd5e1; }
+    .step.done .step-label { color: #86efac; }
+    .step.error .step-label { color: #fca5a5; }
+    .step-quip { font-size: 10.5px; color: #6b7280; font-style: italic; }
+
+    /* Log area */
+    .log-area {
+      width: 100%; font-size: 10px; color: #4b5563; font-family: 'Cascadia Code', 'Consolas', monospace;
+      background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.05);
+      border-radius: 7px; padding: 7px 10px; height: 54px; overflow-y: auto;
+      line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+      margin-bottom: 12px;
+    }
+    .log-area::-webkit-scrollbar { width: 4px; }
+    .log-area::-webkit-scrollbar-track { background: transparent; }
+    .log-area::-webkit-scrollbar-thumb { background: rgba(148,163,184,.2); border-radius: 2px; }
+
+    /* Skip button (only shown if stuck) */
+    .skip-btn {
+      display: none; font-size: 11px; color: #6b7280; background: none; border: none;
+      cursor: pointer; padding: 4px 10px; border-radius: 6px; text-decoration: underline;
+      transition: color .2s;
+    }
+    .skip-btn:hover { color: #9ca3af; }
+    .skip-btn.visible { display: block; }
+
+    /* Done checkmark burst */
+    .done-burst {
+      display: none; flex-direction: column; align-items: center; gap: 8px; margin-top: 4px;
+    }
+    .done-burst .check { font-size: 36px; animation: pop .4s cubic-bezier(.36,2,.6,1) both; }
+    @keyframes pop { from { transform: scale(0); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .done-burst p { font-size: 13px; color: #a78bfa; font-weight: 600; }
+    .done-burst small { font-size: 11px; color: #6b7280; }
   </style>
 </head>
 <body>
   <div class="card">
-    <img class="logo" src="../assets/LOGO.png" alt="" onerror="this.style.display='none'">
-    <div class="name">VibeForge</div>
-    <div class="spin"></div>
-    <div class="sub">Starting up…</div>
+
+    <!-- Normal splash -->
+    <div id="normal-splash">
+      <img class="logo" src="../assets/LOGO.png" alt="" onerror="this.style.display='none'">
+      <div class="name">VibeForge</div>
+      <div class="spin"></div>
+      <div class="sub" id="normal-sub">Starting up…</div>
+    </div>
+
+    <!-- First-run setup wizard -->
+    <div id="setup-splash">
+      <img class="setup-logo" src="../assets/LOGO.png" alt="" onerror="this.style.display='none'">
+      <div class="setup-title">Welcome to VibeForge</div>
+      <div class="setup-tagline">Setting up your local AI stack — one time only</div>
+
+      <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+
+      <div class="steps" id="steps-list">
+        <!-- injected by JS -->
+      </div>
+
+      <div class="log-area" id="setup-log"></div>
+      <div class="done-burst" id="done-burst">
+        <div class="check">✅</div>
+        <p>You're all set!</p>
+        <small>Launching VibeForge…</small>
+      </div>
+      <button class="skip-btn" id="skip-btn" onclick="doSkip()">Skip setup (I'll do this later)</button>
+    </div>
+
   </div>
+
+  <script>
+    // ─── Step definitions ──────────────────────────────────────────────────────
+    const STEPS = [
+      { id: 'deps',    label: 'Checking dependencies',    quips: ['Making sure everything is in order…', 'Inspecting the toolbox…', 'Do we even have the stuff?'] },
+      { id: 'ollama',  label: 'Installing Ollama',        quips: ['Downloading your new AI butler…', 'Ollama, get in here!', 'Big brain incoming…'] },
+      { id: 'model',   label: 'Pulling AI model',         quips: ['Downloading the brains (~2 GB, be patient)…', 'Neurons assembling…', 'Worth the wait, promise.'] },
+      { id: 'whisper', label: 'Setting up Whisper',       quips: ['Teaching your app to listen…', 'Ears incoming (~150 MB)…', 'Speech-to-text go brrr'] },
+      { id: 'done',    label: 'Ready to forge',           quips: ['Sharpening the forge…', 'Final polish…', 'Almost there!'] },
+    ];
+
+    let stepStates = {}; // id -> 'pending'|'active'|'done'|'error'
+    STEPS.forEach(s => stepStates[s.id] = 'pending');
+
+    function renderSteps() {
+      const list = document.getElementById('steps-list');
+      list.innerHTML = STEPS.map(s => {
+        const state = stepStates[s.id];
+        const quip = s.quips[Math.floor(Math.random() * s.quips.length)];
+        const icon = state === 'done' ? '✓' : state === 'error' ? '✗' : state === 'active' ? '' : '·';
+        const iconHtml = state === 'active'
+          ? `<div class="step-icon"><div class="step-spin"></div></div>`
+          : `<div class="step-icon">${icon}</div>`;
+        return `<div class="step ${state}" id="step-${s.id}">
+          ${iconHtml}
+          <div>
+            <div class="step-label">${s.label}</div>
+            ${state === 'active' ? `<div class="step-quip">${quip}</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function setStep(id, state) {
+      stepStates[id] = state;
+      renderSteps();
+      // Update progress bar
+      const done = Object.values(stepStates).filter(v => v === 'done').length;
+      document.getElementById('prog-fill').style.width = `${Math.round((done / STEPS.length) * 100)}%`;
+    }
+
+    function appendLog(text) {
+      const el = document.getElementById('setup-log');
+      el.textContent += text;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function showSetupMode() {
+      document.getElementById('normal-splash').style.display = 'none';
+      const el = document.getElementById('setup-splash');
+      el.style.display = 'flex';
+      renderSteps();
+    }
+
+    function doSkip() {
+      if (window.splashBridge) window.splashBridge.skipSetup();
+    }
+
+    // Show skip button after 30s in case something stalls
+    setTimeout(() => {
+      document.getElementById('skip-btn').classList.add('visible');
+    }, 30000);
+
+    // ─── Bridge wiring ─────────────────────────────────────────────────────────
+    window.addEventListener('DOMContentLoaded', async () => {
+      if (!window.splashBridge) return; // no bridge = normal mode, nothing to do
+
+      const info = await window.splashBridge.checkFirstRun();
+
+      if (!info || !info.firstRun) {
+        // Normal fast launch
+        document.getElementById('normal-sub').textContent = 'Starting up…';
+        return;
+      }
+
+      // First run → show wizard
+      showSetupMode();
+
+      window.splashBridge.onSetupStep((data) => {
+        // data: { stepId, state, log }
+        if (data.stepId) setStep(data.stepId, data.state);
+        if (data.log) appendLog(data.log);
+      });
+
+      window.splashBridge.onSetupDone((data) => {
+        STEPS.forEach(s => { if (stepStates[s.id] !== 'error') stepStates[s.id] = 'done'; });
+        renderSteps();
+        document.getElementById('prog-fill').style.width = '100%';
+        document.getElementById('setup-log').style.display = 'none';
+        document.getElementById('done-burst').style.display = 'flex';
+        document.getElementById('skip-btn').classList.remove('visible');
+      });
+
+      // Kick off setup
+      window.splashBridge.runSetup();
+    });
+  </script>
 </body>
 </html>
