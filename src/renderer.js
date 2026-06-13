@@ -42,7 +42,13 @@ async function init() {
   // Load last or first project
   currentProject = projects[0];
   updateProjectHeader(currentProject);
-  await switchView('sessions');
+  const params = new URLSearchParams(window.location.search || '');
+  if (params.get('duoTest') === '1') {
+    await switchView('share');
+    setTimeout(() => showToast('Duo tester window: paste the host room code here.'), 300);
+  } else {
+    await switchView('sessions');
+  }
   // Keep the tour available from the sidebar, but do not auto-block the app with
   // a full-screen overlay on launch. The previous auto-open made the UI feel unclickable.
 
@@ -1804,121 +1810,125 @@ async function renderDuoSetup(session) {
   await switchView('share');
 }
 
-// === 6. SHARE WITH NICK QOL - clear instructions, copy, status, firewall note, troubleshooting, reveal received, send only when linked ===
+// === 6. SHARE / DUO LINK - real PeerJS room codes plus a built-in two-window tester ===
 async function renderShareView(content, actionsEl) {
-  actionsEl.innerHTML = '';
+  if (!content) content = document.getElementById('main-content');
+  if (!actionsEl) actionsEl = document.getElementById('view-actions');
+  if (actionsEl) actionsEl.innerHTML = '';
+
   const status = await getDuoStatus();
   const roomCode = status.roomCode || status.address || '';
   const isHosting = status.status === 'hosting';
   const isConnected = status.status === 'connected';
+  const isConnecting = status.status === 'connecting';
+  const isTester = new URLSearchParams(window.location.search || '').get('duoTest') === '1';
 
-  const statusDot = isConnected
-    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;margin-right:6px;"></span>`
-    : isHosting
-    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 6px #f59e0b;margin-right:6px;"></span>`
-    : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#52525b;margin-right:6px;"></span>`;
+  const statusClass = isConnected
+    ? 'bg-emerald-500 shadow-[0_0_18px_rgba(16,185,129,.7)]'
+    : isHosting || isConnecting
+    ? 'bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,.65)]'
+    : 'bg-zinc-500';
+  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting - waiting for join' : isConnecting ? 'Connecting' : 'Offline';
 
-  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting — waiting for your collaborator…' : 'Not connected';
+  const receivedHtml = receivedItems.length ? receivedItems.map(item => {
+    const label = `${item.type || 'item'}: ${item.title || item.name || item.path || ''}`;
+    const safePath = item.path ? item.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'") : '';
+    return `
+      <div class="flex items-center justify-between gap-2 rounded-xl border border-white/5 bg-white/[.03] px-3 py-2 text-xs">
+        <span class="min-w-0 truncate text-zinc-300">${esc(label)}</span>
+        ${item.path ? `<button onclick="revealSpecificReceived('${safePath}')" class="shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-cyan-300 hover:bg-zinc-800">Reveal</button>` : ''}
+      </div>`;
+  }).join('') : `<div class="rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">Nothing received yet.</div>`;
 
-  let html = `
-  <div style="max-width:540px;margin:0 auto;padding:8px 0;">
-
-    <!-- Header -->
-    <div style="margin-bottom:22px;">
-      <div style="font-size:22px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;margin-bottom:4px;">Link Up</div>
-      <div style="font-size:12px;color:#71717a;">Real-time P2P connection — works across the internet, no cloud, no accounts.</div>
-    </div>
-
-    <!-- Status pill -->
-    <div style="display:inline-flex;align-items:center;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:999px;padding:5px 14px;font-size:12px;color:#a1a1aa;margin-bottom:20px;">
-      ${statusDot}${esc(statusLabel)}
-    </div>
-
-    <!-- Host card -->
-    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:2px;">🖥️ Host a Session</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:6px;">Works across the internet. The person with the beefier PC should host.</div>
-      <div style="font-size:10.5px;color:#52525b;margin-bottom:14px;">Host generates a room code — share it, your collaborator pastes it in Join. Powered by WebRTC — data goes peer-to-peer once connected.</div>
-      ${isHosting || isConnected ? `
-        <div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:12px 16px;margin-bottom:12px;">
-          <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Room Code</div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span style="font-family:monospace;font-size:20px;font-weight:700;color:#a78bfa;letter-spacing:.05em;flex:1;">${esc(roomCode)}</span>
-            <button onclick="copyPeerAddress()" style="flex-shrink:0;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;">Copy</button>
+  content.innerHTML = `
+    <div class="space-y-4">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <div class="flex items-center gap-2 text-xs uppercase tracking-[.18em] text-cyan-300">
+            <span class="h-2 w-2 rounded-full ${statusClass}"></span>
+            Duo Link ${isTester ? '<span class="rounded-full bg-purple-500/20 px-2 py-0.5 text-[10px] text-purple-200">Tester Window</span>' : ''}
           </div>
-          ${isHosting ? `<div style="font-size:11px;color:#f59e0b;margin-top:8px;">Share this code — waiting for someone to join…</div>` : ''}
-          ${isConnected ? `<div style="font-size:11px;color:#22c55e;margin-top:8px;">Connected!</div>` : ''}
+          <div class="mt-2 text-3xl font-semibold tracking-normal text-white">Test 2-person connection</div>
+          <div class="mt-1 max-w-2xl text-sm text-zinc-400">Open a second tester window, host from one side, join from the other, then send notes or a file to prove the link works before Nick or Dylan tries it.</div>
         </div>
-        <button onclick="duoDisconnectFromShare()" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;">Disconnect</button>
-      ` : `
-        <button onclick="hostFromShare(this)" style="background:#6366f1;color:#fff;border:none;border-radius:10px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">Generate Room Code</button>
-      `}
-    </div>
+        <div class="rounded-2xl border border-zinc-800 bg-zinc-950/70 px-4 py-3 text-sm">
+          <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Status</div>
+          <div class="mt-1 flex items-center gap-2 font-medium text-white"><span class="h-2.5 w-2.5 rounded-full ${statusClass}"></span>${esc(statusLabel)}</div>
+        </div>
+      </div>
 
-    <!-- Join card -->
-    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🔗 Join a Session</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">The host shares their room code. Paste it below and connect.</div>
-      <div style="display:flex;gap:8px;">
-        <input id="join-addr-main" placeholder="e.g. forge-4829" style="flex:1;background:#0d0d12;border:1px solid #3f3f46;border-radius:9px;padding:8px 12px;font-size:14px;color:#e2e8f0;outline:none;font-family:monospace;"
-          onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)">
-        <button onclick="doJoinFromShare(this)" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;">Join</button>
+      <div class="grid gap-4 xl:grid-cols-[1fr_340px]">
+        <section class="rounded-[28px] border border-zinc-800 bg-[#090b13] p-5 shadow-2xl">
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div class="rounded-3xl border border-purple-500/25 bg-purple-500/10 p-5">
+              <div class="flex items-center gap-3">
+                <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-purple-500/20 text-purple-200"><i class="fa-solid fa-tower-broadcast"></i></div>
+                <div><div class="font-semibold text-white">Host</div><div class="text-xs text-zinc-400">This window generates a room code.</div></div>
+              </div>
+              <div class="mt-4 rounded-2xl border border-zinc-800 bg-black/30 p-4">
+                <div class="text-[11px] uppercase tracking-[.16em] text-zinc-500">Room Code</div>
+                <div class="mt-2 flex min-h-[40px] items-center gap-2">
+                  <div class="min-w-0 flex-1 truncate font-mono text-2xl font-semibold text-purple-200">${roomCode ? esc(roomCode) : 'not hosting'}</div>
+                  ${roomCode ? `<button onclick="copyPeerAddress()" class="rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black">Copy</button>` : ''}
+                </div>
+                <div class="mt-2 text-xs text-zinc-500">${isHosting ? 'Waiting for the other window/person to join.' : isConnected ? 'Connected. You can send notes/files below.' : 'Click Host to create a test code.'}</div>
+              </div>
+              <div class="mt-4 flex gap-2">
+                ${isHosting || isConnected ? `<button onclick="duoDisconnectFromShare()" class="flex-1 rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 hover:bg-zinc-800">Disconnect</button>` : `<button onclick="hostFromShare(this)" class="flex-1 rounded-2xl bg-purple-600 py-3 text-sm font-semibold text-white hover:bg-purple-500">Host / Generate Code</button>`}
+              </div>
+            </div>
+
+            <div class="rounded-3xl border border-cyan-500/25 bg-cyan-500/10 p-5">
+              <div class="flex items-center gap-3">
+                <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/20 text-cyan-200"><i class="fa-solid fa-plug-circle-bolt"></i></div>
+                <div><div class="font-semibold text-white">Join</div><div class="text-xs text-zinc-400">Paste the host code in the other window.</div></div>
+              </div>
+              <div class="mt-4">
+                <input id="join-addr-main" placeholder="paste code like forge-4829" class="w-full rounded-2xl border border-zinc-700 bg-black/35 px-4 py-3 font-mono text-sm text-white outline-none focus:border-cyan-400" onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)">
+                <button onclick="doJoinFromShare(this)" class="mt-3 w-full rounded-2xl bg-cyan-600 py-3 text-sm font-semibold text-white hover:bg-cyan-500">Join Code</button>
+              </div>
+              <div class="mt-3 text-xs text-zinc-500">For one-PC testing: Host in main window, click "Open Tester Window", then paste the code there.</div>
+            </div>
+          </div>
+
+          ${isConnected && window._pendingDuoSession ? `
+            <div class="mt-4 rounded-3xl border border-emerald-500/30 bg-emerald-500/10 p-5">
+              <div class="font-semibold text-emerald-200">Duo session is linked</div>
+              <div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are connected.</div>
+              <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Recording</button>
+            </div>` : ''}
+
+          ${isConnected ? `
+            <div class="mt-4 rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div><div class="font-semibold text-white">Send a test payload</div><div class="text-xs text-zinc-400">Use this to prove the connection is really working.</div></div>
+                <div class="flex gap-2"><button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Send Latest Notes</button><button onclick="sendExportedBundle()" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800">Send File</button></div>
+              </div>
+            </div>` : ''}
+        </section>
+
+        <aside class="space-y-4">
+          <div class="rounded-[24px] border border-cyan-500/25 bg-cyan-500/10 p-5">
+            <div class="font-semibold text-white">One-PC two-person test</div>
+            <div class="mt-2 text-sm text-zinc-400">This opens a second VibeForge window with its own PeerJS connection context. It acts like Nick/Dylan for testing.</div>
+            <button onclick="openDuoTestWindow()" class="mt-4 w-full rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black hover:bg-zinc-200">Open Tester Window</button>
+            <div class="mt-4 space-y-2 text-xs text-zinc-400"><div><span class="text-cyan-300">1.</span> Main window: Host / Generate Code.</div><div><span class="text-cyan-300">2.</span> Tester window: paste code and Join.</div><div><span class="text-cyan-300">3.</span> Send notes or a file and check Received.</div></div>
+          </div>
+
+          <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5">
+            <div class="flex items-center justify-between gap-3"><div class="font-semibold text-white">Received</div><button onclick="revealReceivedFolder()" class="rounded-xl border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Open Folder</button></div>
+            <div class="mt-3 space-y-2">${receivedHtml}</div>
+          </div>
+
+          <div class="rounded-[24px] border border-zinc-800 bg-zinc-950/70 p-5 text-xs leading-6 text-zinc-400">
+            <div class="mb-2 font-semibold text-white">What this proves</div>
+            <div>- PeerJS loaded correctly.</div><div>- Host code is reachable.</div><div>- Join flow works.</div><div>- Data sends through WebRTC.</div><div>- Received files save locally.</div>
+          </div>
+        </aside>
       </div>
     </div>
-
-    <!-- Pending Duo Session: start recording once linked -->
-    ${isConnected && window._pendingDuoSession ? `
-    <div style="background:#0f2a1a;border:1px solid rgba(34,197,94,.35);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#86efac;margin-bottom:4px;">🎙️ Duo Session Ready</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">You're linked! Start the recording for "${esc(window._pendingDuoSession.title)}".</div>
-      <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" style="background:#16a34a;color:#fff;border:none;border-radius:9px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">▶ Start Recording</button>
-    </div>` : ''}
-
-    <!-- Send card (only when connected) -->
-    ${isConnected ? `
-    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">📤 Send</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Push session notes or a file directly to your collaborator.</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button onclick="sendCurrentSessionNotes()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send Session Notes</button>
-        <button onclick="sendExportedBundle()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send File…</button>
-      </div>
-    </div>` : ''}
-
-    <!-- Received -->
-    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">📥 Received</div>
-        <button onclick="revealReceivedFolder()" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;">Open folder</button>
-      </div>
-      <div style="font-size:12px;">
-        ${receivedItems.length ? receivedItems.map(item => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);">
-            <span style="color:#a1a1aa;">${esc(item.type || 'item')}: ${esc(item.title || item.path || '')}</span>
-            ${item.path ? `<button onclick="revealSpecificReceived('${item.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')"
-              style="background:transparent;border:none;color:#6366f1;font-size:11px;cursor:pointer;text-decoration:underline;">reveal</button>` : ''}
-          </div>`).join('') : '<span style="color:#3f3f46;">Nothing received yet.</span>'}
-      </div>
-    </div>
-
-    <!-- How it works -->
-    <details style="margin-top:4px;">
-      <summary style="font-size:11.5px;color:#52525b;cursor:pointer;user-select:none;padding:4px 0;">How does this work?</summary>
-      <div style="font-size:11px;color:#52525b;line-height:1.8;padding:10px 0 4px;">
-        • Host clicks <strong style="color:#71717a;">Generate Room Code</strong> — gets a code like <span style="font-family:monospace;">forge-4829</span><br>
-        • Host shares that code (text, Discord, whatever)<br>
-        • Collaborator pastes it in Join and clicks Join<br>
-        • WebRTC connects you directly — no server in the middle after that<br>
-        • Works from any internet connection, any location<br>
-        • The person with the better PC / faster upload should host
-      </div>
-    </details>
-
-  </div>`;
-
-  content.innerHTML = html;
+  `;
 }
-
 window.copyPeerAddress = async function() {
   const status = await getDuoStatus();
   const addr = status.roomCode || status.address || '';
@@ -1951,28 +1961,46 @@ window.revealSpecificReceived = function(p) {
   showToast('Look for: ' + p);
 };
 
-async function hostFromShare(btn) {
-  btn.disabled = true;
-  btn.textContent = 'Starting...';
-  const res = window.vibePeer ? await window.vibePeer.duoHost() : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
-  if (res && res.ok) showToast('Room code ready: ' + (res.roomCode || res.address || '')); else showToast('Host failed: ' + (res ? res.error : 'unknown'));
-  await switchView('share');
-}
+window.openDuoTestWindow = async function() {
+  if (!window.vibeforge.openDuoTestWindow) {
+    showToast('Tester window API is not available. Restart VibeForge.');
+    return;
+  }
+  const res = await window.vibeforge.openDuoTestWindow();
+  if (res && res.ok) showToast(res.focused ? 'Tester window focused' : 'Tester window opened');
+  else showToast('Could not open tester window: ' + (res ? res.error : 'unknown'));
+};
 
-// showJoinInput removed — join input is now always visible inline in renderShareView
+async function hostFromShare(btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+  }
+  try {
+    const res = window.vibePeer ? await window.vibePeer.duoHost() : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
+    if (res && res.ok) showToast('Room code ready: ' + (res.roomCode || res.address || ''));
+    else showToast('Host failed: ' + (res ? res.error : 'unknown'));
+  } finally {
+    await switchView('share');
+  }
+}
 
 async function doJoinFromShare(btn) {
   const input = document.getElementById('join-addr-main');
   const addr = input ? input.value.trim() : '';
   if (!addr) { showToast('Paste an address first'); return; }
-  btn.disabled = true;
-  btn.textContent = 'Joining...';
-  const res = window.vibePeer ? await window.vibePeer.duoJoin(addr) : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
-  if (res.ok) showToast('Connected to ' + addr);
-  else showToast('Failed: ' + res.error);
-  await switchView('share');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Joining...';
+  }
+  try {
+    const res = window.vibePeer ? await window.vibePeer.duoJoin(addr) : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
+    if (res.ok) showToast('Connected to ' + addr);
+    else showToast('Failed: ' + res.error);
+  } finally {
+    await switchView('share');
+  }
 }
-
 window.sendCurrentSessionNotes = async function() {
   if (!currentProject) return;
   const sessions = await window.vibeforge.getSessions(currentProject.id);

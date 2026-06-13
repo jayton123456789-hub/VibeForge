@@ -123,6 +123,7 @@ function downloadFile(url, dest, onProgress) {
 }
 
 let mainWindow;
+let duoTestWindow = null;
 let db;
 let peerServer = null;
 let peerClient = null;
@@ -284,6 +285,10 @@ function registerIpc() {
       thumbnail: s.thumbnail ? s.thumbnail.toDataURL() : null,
       appIcon: s.appIcon ? s.appIcon.toDataURL() : null
     }));
+  });
+
+  ipcMain.handle('open-duo-test-window', () => {
+    return createDuoTestWindow();
   });
 
   // Projects
@@ -1763,6 +1768,55 @@ function createWindow() {
     if (peerServer) { try { peerServer.close(); } catch (e) {} }
     if (peerClient) { try { peerClient.close(); } catch (e) {} }
   });
+}
+
+function createDuoTestWindow() {
+  if (isUpdateMode) return { ok: false, error: 'App is updating' };
+  if (duoTestWindow && !duoTestWindow.isDestroyed()) {
+    duoTestWindow.focus();
+    return { ok: true, focused: true };
+  }
+
+  duoTestWindow = new BrowserWindow({
+    width: 980,
+    height: 760,
+    minWidth: 860,
+    minHeight: 620,
+    backgroundColor: '#070812',
+    autoHideMenuBar: true,
+    title: 'VibeForge Duo Tester',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#070812',
+      symbolColor: '#cbd5e1',
+      height: 36
+    },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    },
+    icon: path.join(__dirname, 'assets/LOGO.png'),
+    show: false
+  });
+
+  duoTestWindow.loadFile(path.join(__dirname, 'src/index.html'), {
+    search: '?duoTest=1'
+  });
+
+  duoTestWindow.once('ready-to-show', () => {
+    if (duoTestWindow && !duoTestWindow.isDestroyed()) {
+      duoTestWindow.show();
+      duoTestWindow.focus();
+    }
+  });
+  setTimeout(() => {
+    if (duoTestWindow && !duoTestWindow.isDestroyed()) duoTestWindow.show();
+  }, 4000);
+  duoTestWindow.on('closed', () => {
+    duoTestWindow = null;
+  });
+  return { ok: true };
 }
 
 async function performAutoUpdateCheck(win) {

@@ -76,34 +76,31 @@ All data in `%APPDATA%\VibeForge\data\vibeforge.db`. Exports/recordings in sibli
 
 No servers, no accounts, no internet required for core use.
 
-## Recent Fixes (v0.2.0)
-- Whisper one-click setup fully robust (uses `python -m pip` + upgrade step inside venv; auto-cleans broken venv on failure; no more pip._internal crashes).
-- **Continue / resume any session**: "Resume Live" buttons in session list + detail view. Re-opens live room pre-filled with previous notes/transcript. Multiple visits supported ("multi" work on the same session). New audio segments are timestamped files; notes + live transcript append on each Stop.
-- Date & time tracking: Sessions list and detail now show full start → end (with duration in minutes) using `ended_at`. Updated automatically on Stop.
-- **Live room UI WAY better**: Notes now behind a clean "📝 Notes" button (opens nice editor modal with large textarea). Quick Actions collapsed into a single "⚡ Quick Actions" popup menu (with icons for Mark Decision/Task/Idea, Add Note, Change Screen). Cleaner main area focused on Recording bar, Mic meter, and **Live Convo / Transcript** (typewriter real-time speech). "Resume this session anytime" hint. Floating draggable recording overlay still there.
-- No more browser `prompt()` / `confirm()` crashes in sandboxed renderer (all replaced with proper input modals or kept only for destructive confirms).
-- Live chat/convo: The real-time transcript is now prominently "Live Convo". Duo peer notes sending/receiving continues to work for cross-PC chat.
-- Start Session modal + project creation now use the nice input modal (no crashes when no project selected).
-- All previous QOL (exports real + reveal, Ollama wizard, GH persist + publish, Share, etc.) intact.
+## Recent Fixes (v0.4.1)
 
-## 📦 Releases & Updates
+- Duo test flow: Share tab now has a built-in "Open Tester Window" button. Host in the main window, join from the tester window, and send notes/files to prove the two-person PeerJS/WebRTC link works before testing with Nick or Dylan.
+- Launch is hardened: launch.bat no longer force-rebuilds better-sqlite3 every run, preventing the EPERM native-module crash when Electron still has the .node file locked.
+- Update checks normalize tags like v4 to 0.4.0 so accidental GitHub release names do not confuse the app.
+- Continue/resume sessions: Resume Live buttons reopen the same session with previous notes/transcript and save new timestamped recording segments.
+- Date/time tracking: sessions show start, end, duration, and mode in lists and detail.
+- Live room polish: notes are behind a button, quick actions are in a menu, recording status is prominent, and transcript/AI cleanup stays focused on the goal of not typing.
+- Whisper setup is more robust: it uses python -m pip inside the venv, upgrades pip/setuptools/wheel, and cleans broken venvs on retry.
+- Browser prompt crashes were replaced with real app modals for input flows.
 
-- Everyone gets a big **CHECK FOR UPDATE** in Settings.
-- Owner uses the same tab for real publishing (see above).
-- Test release example: [v0.1.0 (Grok test)](https://github.com/jayton123456789-hub/VibeForge/releases/tag/v0.1.0-grok-test)
+## Releases & Updates
+
+- Everyone gets a big CHECK FOR UPDATE in Settings.
+- Owner uses the same tab for real publishing.
+- Current recommended release: v0.4.1 or newer.
 
 ## Philosophy
 
 > For creators who build through conversation.
 
-Capture the "shit, that's a good idea" moment instantly. Never lose a decision. Turn talk into shipped product — with your collaborator, locally, with AI that only knows *your* stuff.
+Capture ideas and decisions while talking, then let local AI organize the workspace after the session. VibeForge is local-first, built for you and your collaborators, and designed to avoid making people type while they are trying to think out loud.
 
 ---
 
-**VibeForge** — built for speed between you and your partner. Local first. Fancy where it counts. Ready to ship.
+**VibeForge** - local first, fast to record, smart after the conversation.
 
-If you're the owner: sign in once via gh, build & publish from inside the app forever after. No context switching.
-
----
-
-*Local AI Creative Session Studio. No cloud. No fuss. Just better building.*
+If you are the owner: sign in once via gh, build and publish from inside the app after that.

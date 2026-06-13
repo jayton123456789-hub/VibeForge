@@ -63,6 +63,7 @@ const api = {
   duoJoin: (address) => ipcRenderer.invoke('duo-join', address),
   duoDisconnect: () => ipcRenderer.invoke('duo-disconnect'),
   getPeerStatus: () => ipcRenderer.invoke('get-peer-status'),
+  openDuoTestWindow: () => ipcRenderer.invoke('open-duo-test-window'),
   peerSendFile: (filePath) => ipcRenderer.invoke('peer-send-file', filePath),
   peerSendText: (text) => ipcRenderer.invoke('peer-send-text', text),
   onPeerFile: (cb) => { ipcRenderer.removeAllListeners('peer-file'); ipcRenderer.on('peer-file', (_e, data) => cb(data)); },
