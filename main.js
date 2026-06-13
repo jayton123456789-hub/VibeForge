@@ -75,6 +75,11 @@ function isNewerVersion(latest, current) {
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
+    file.on('error', (err) => {
+      try { req && req.destroy(); } catch (e) {}
+      try { fs.unlinkSync(dest); } catch (e) {}
+      reject(err);
+    });
     const req = https.get(url, { headers: { 'User-Agent': 'VibeForge' } }, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
         file.close();
@@ -113,6 +118,10 @@ let peerServer = null;
 let peerClient = null;
 let currentPeer = null; // { type: 'host' | 'client', address: string, ws: ws }
 let hostAddress = null; // stored when duoHost() starts so get-peer-status can return it immediately
+let peerJsHost = null;  // PeerJS Peer instance (host side)
+let peerJsConn = null;  // active PeerJS DataConnection
+let peerJsId = null;    // our PeerJS peer ID (the room code)
+let pendingIncomingFile = null; // tracks incoming file metadata across chunks
 
 // Config for tray/close later, but minimal now - always quit on close
 let appConfig = {};
@@ -653,122 +662,173 @@ function registerIpc() {
     return res.filePaths[0] || null;
   });
 
-  // For Duo/Share real link (WebSocket)
-  // NOTE: ws v8 delivers BOTH text and binary frames as Buffers — the isBinary flag is the
-  // only reliable way to tell them apart. The old Buffer.isBuffer check treated every text
-  // message as a file, which silently broke peer note-sending.
-  let pendingIncomingFile = null;
-  function handlePeerData(msg, isBinary) {
-    if (isBinary) {
-      const receivedDir = getReceivedDir();
-      const safeName = (pendingIncomingFile && pendingIncomingFile.name)
-        ? pendingIncomingFile.name.replace(/[^a-zA-Z0-9._ -]/g, '_')
-        : `received-${Date.now()}.bin`;
-      let filePath = path.join(receivedDir, safeName);
-      if (fs.existsSync(filePath)) {
-        const ext = path.extname(safeName);
-        const base = path.basename(safeName, ext);
-        filePath = path.join(receivedDir, `${base}-${Date.now()}${ext}`);
-      }
-      fs.writeFileSync(filePath, msg);
-      pendingIncomingFile = null;
-      if (mainWindow) mainWindow.webContents.send('peer-file', { path: filePath });
-    } else {
-      const text = msg.toString();
-      try {
-        const obj = JSON.parse(text);
-        if (obj && obj.type === 'file-start') { pendingIncomingFile = { name: obj.name }; return; }
-        if (obj && obj.type === 'file-end') { pendingIncomingFile = null; return; }
-      } catch (e) { /* plain text message */ }
-      if (mainWindow) mainWindow.webContents.send('peer-message', text);
-    }
+  // ═══════════════════════════════════════════════════════════════════════
+  // LINK — PeerJS-based internet P2P (replaces old LAN-only WebSocket duo)
+  // Uses PeerJS free cloud signaling (0.peerjs.com) for matchmaking;
+  // actual data flows directly peer-to-peer via WebRTC DataChannels.
+  // Works across the internet — different homes, different ISPs.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  function pjCleanup() {
+    if (peerJsConn) { try { peerJsConn.close(); } catch(e){} peerJsConn = null; }
+    if (peerJsHost) { try { peerJsHost.destroy(); } catch(e){} peerJsHost = null; }
+    peerJsId = null;
+    hostAddress = null;
+    currentPeer = null;
   }
 
-  ipcMain.handle('duo-host', async () => {
-    if (peerServer) {
-      try { peerServer.close(); } catch (e) {}
+  function pjSend(data) {
+    if (peerJsConn && peerJsConn.open) {
+      peerJsConn.send(data);
+      return { ok: true };
     }
-    const port = 48290 + Math.floor(Math.random() * 100);
-    const ip = getLocalIP();
-    hostAddress = `${ip}:${port}`;
-    peerServer = new WebSocket.Server({ port });
+    return { ok: false, error: 'Not connected' };
+  }
 
-    peerServer.on('connection', (ws) => {
-      currentPeer = { type: 'host', address: `${ip}:${port}`, ws };
-      ws.on('message', (msg, isBinary) => handlePeerData(msg, isBinary));
-      ws.on('close', () => { currentPeer = null; });
-      if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'connected', address: `${ip}:${port}` });
+  function pjWireConn(conn, role) {
+    peerJsConn = conn;
+    conn.on('open', () => {
+      currentPeer = { type: role, address: conn.peer, ws: { readyState: 1, send: d => conn.send(d) } };
+      hostAddress = role === 'host' ? peerJsId : conn.peer;
+      if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'connected', address: conn.peer, roomCode: peerJsId || conn.peer });
     });
+    conn.on('data', (raw) => {
+      // PeerJS DataConnection delivers already-deserialized JS objects (binary mode = ArrayBuffer)
+      if (raw instanceof ArrayBuffer || ArrayBuffer.isView(raw)) {
+        // File chunk
+        if (pendingIncomingFile) {
+          const receivedDir = getReceivedDir();
+          const safeName = pendingIncomingFile.name
+            ? pendingIncomingFile.name.replace(/[^a-zA-Z0-9._ -]/g, '_') : `received-${Date.now()}.bin`;
+          let filePath = path.join(receivedDir, safeName);
+          if (fs.existsSync(filePath)) filePath = path.join(receivedDir, `${Date.now()}-${safeName}`);
+          fs.writeFileSync(filePath, Buffer.from(raw instanceof ArrayBuffer ? raw : raw.buffer));
+          pendingIncomingFile = null;
+          if (mainWindow) mainWindow.webContents.send('peer-file', { path: filePath });
+        }
+      } else if (typeof raw === 'string') {
+        try {
+          const obj = JSON.parse(raw);
+          if (obj && obj.type === 'file-start') { pendingIncomingFile = { name: obj.name }; return; }
+          if (obj && obj.type === 'file-end')   { pendingIncomingFile = null; return; }
+        } catch(e) {}
+        if (mainWindow) mainWindow.webContents.send('peer-message', raw);
+      } else if (raw && typeof raw === 'object') {
+        // PeerJS default serialization sends objects directly
+        const text = JSON.stringify(raw);
+        if (mainWindow) mainWindow.webContents.send('peer-message', text);
+      }
+    });
+    conn.on('close', () => {
+      peerJsConn = null;
+      currentPeer = null;
+      if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'disconnected' });
+    });
+    conn.on('error', (err) => {
+      if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'error', error: err.message });
+    });
+  }
 
-    return { address: `${ip}:${port}`, port };
+  // Generate a short human-friendly room code like "forge-4829"
+  function makeRoomCode() {
+    const words = ['forge','vibe','link','sync','beam','cast','wave','pulse','flow','mesh'];
+    const word = words[Math.floor(Math.random() * words.length)];
+    const num  = Math.floor(1000 + Math.random() * 9000);
+    return `${word}-${num}`;
+  }
+
+  // HOST: create a Peer with our room code; wait for the other person to connect
+  ipcMain.handle('duo-host', () => {
+    return new Promise((resolve) => {
+      pjCleanup();
+      let Peer;
+      try { Peer = require('peerjs').Peer; } catch(e) {
+        return resolve({ ok: false, error: 'peerjs not installed — run npm install in the app folder' });
+      }
+      const code = makeRoomCode();
+      peerJsId = code;
+      hostAddress = code;
+      const peer = new Peer(code, { debug: 0 });
+      peerJsHost = peer;
+
+      peer.on('open', (id) => {
+        if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'hosting', roomCode: id, address: id });
+        resolve({ ok: true, roomCode: id, address: id });
+      });
+      peer.on('connection', (conn) => {
+        pjWireConn(conn, 'host');
+      });
+      peer.on('error', (err) => {
+        if (!peerJsConn) resolve({ ok: false, error: err.message });
+        if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'error', error: err.message });
+      });
+
+      // Timeout if signaling server doesn't respond in 10s
+      setTimeout(() => {
+        if (!peer.open && !peerJsConn) resolve({ ok: false, error: 'Timed out connecting to signaling server — check internet connection' });
+      }, 10000);
+    });
   });
 
-  ipcMain.handle('duo-join', async (e, address) => {
-    if (peerClient) {
-      try { peerClient.close(); } catch (e) {}
-    }
+  // JOIN: connect to the host's room code
+  ipcMain.handle('duo-join', (e, roomCode) => {
     return new Promise((resolve) => {
-      try {
-        peerClient = new WebSocket(`ws://${address}`);
-        peerClient.on('open', () => {
-          currentPeer = { type: 'client', address, ws: peerClient };
-          if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'connected', address });
-          resolve({ ok: true, address });
-        });
-        peerClient.on('message', (msg, isBinary) => handlePeerData(msg, isBinary));
-        peerClient.on('close', () => {
-          currentPeer = null;
-          if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'disconnected' });
-        });
-        peerClient.on('error', (err) => {
-          resolve({ ok: false, error: err.message });
-        });
-      } catch (err) {
-        resolve({ ok: false, error: err.message });
+      pjCleanup();
+      let Peer;
+      try { Peer = require('peerjs').Peer; } catch(err) {
+        return resolve({ ok: false, error: 'peerjs not installed' });
       }
+      if (!roomCode || !roomCode.trim()) return resolve({ ok: false, error: 'Room code required' });
+      const code = roomCode.trim().toLowerCase();
+      const peer = new Peer({ debug: 0 });
+      peerJsHost = peer;
+
+      peer.on('open', () => {
+        const conn = peer.connect(code, { reliable: true, serialization: 'json' });
+        pjWireConn(conn, 'client');
+        conn.on('open', () => resolve({ ok: true, roomCode: code }));
+        conn.on('error', (err) => resolve({ ok: false, error: err.message }));
+        // Timeout
+        setTimeout(() => {
+          if (!conn.open) resolve({ ok: false, error: 'Could not reach room code "' + code + '" — make sure the host has started and the code is correct.' });
+        }, 15000);
+      });
+      peer.on('error', (err) => resolve({ ok: false, error: err.message }));
     });
   });
 
   ipcMain.handle('peer-send-file', async (e, filePath) => {
-    if (!currentPeer || !currentPeer.ws || currentPeer.ws.readyState !== 1) {
-      return { ok: false, error: 'Not connected' };
-    }
+    if (!peerJsConn || !peerJsConn.open) return { ok: false, error: 'Not connected' };
     try {
       const buf = fs.readFileSync(filePath);
       const name = path.basename(filePath);
-      currentPeer.ws.send(JSON.stringify({ type: 'file-start', name, size: buf.length }));
-      currentPeer.ws.send(buf); // send binary
-      currentPeer.ws.send(JSON.stringify({ type: 'file-end' }));
+      peerJsConn.send(JSON.stringify({ type: 'file-start', name, size: buf.length }));
+      peerJsConn.send(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      peerJsConn.send(JSON.stringify({ type: 'file-end' }));
       return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
+    } catch (e) { return { ok: false, error: e.message }; }
   });
 
   ipcMain.handle('peer-send-text', (e, text) => {
-    if (!currentPeer || !currentPeer.ws || currentPeer.ws.readyState !== 1) {
-      return { ok: false, error: 'Not connected' };
-    }
-    try {
-      currentPeer.ws.send(text);
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
+    if (!peerJsConn || !peerJsConn.open) return { ok: false, error: 'Not connected' };
+    try { peerJsConn.send(text); return { ok: true }; }
+    catch (e) { return { ok: false, error: e.message }; }
   });
 
   ipcMain.handle('duo-disconnect', () => {
-    if (peerServer) { try { peerServer.close(); } catch (e) {} peerServer = null; }
-    if (peerClient) { try { peerClient.close(); } catch (e) {} peerClient = null; }
-    currentPeer = null;
-    hostAddress = null;
+    pjCleanup();
+    // Also kill old-style WS connections if any linger
+    if (peerServer) { try { peerServer.close(); } catch(e){} peerServer = null; }
+    if (peerClient) { try { peerClient.close(); } catch(e){} peerClient = null; }
     if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'disconnected' });
     return true;
   });
 
   ipcMain.handle('get-peer-status', () => {
-    if (currentPeer) return { status: 'connected', address: currentPeer.address, type: currentPeer.type };
-    if (peerServer) return { status: 'hosting', address: hostAddress };
+    if (peerJsConn && peerJsConn.open)
+      return { status: 'connected', address: peerJsConn.peer, roomCode: peerJsId || peerJsConn.peer, type: currentPeer?.type };
+    if (peerJsHost && peerJsId)
+      return { status: 'hosting', roomCode: peerJsId, address: peerJsId };
     return { status: 'offline' };
   });
 
@@ -1131,9 +1191,15 @@ function registerIpc() {
 
       const url = asset.browser_download_url;
       if (!fs.existsSync(updateDir)) fs.mkdirSync(updateDir, { recursive: true });
-      const newExe = path.join(updateDir, 'VibeForge-Portable-new.exe');
+      // Unique filename so we never collide with (and fail to overwrite) a currently-running
+      // exe of the same name — e.g. if a prior update left us running from inside updateDir.
+      const newExe = path.join(updateDir, `VibeForge-Portable-${Date.now()}.exe`);
 
-      await downloadFile(url, newExe);
+      try {
+        await downloadFile(url, newExe);
+      } catch (err) {
+        return { ok: false, error: 'Download failed: ' + err.message };
+      }
 
       const current = process.execPath;
       let spawnArgs = [];
@@ -1142,10 +1208,17 @@ function registerIpc() {
       }
       // For dev (source), just launch the new portable as the "updated" version.
       // For packaged, use the target copy logic to replace in place (remove old version).
-      const child = spawn(newExe, spawnArgs, { detached: true, stdio: 'ignore' });
-      child.unref();
-      app.quit();
-      return { ok: true };
+      return new Promise((resolve) => {
+        const child = spawn(newExe, spawnArgs, { detached: true, stdio: 'ignore' });
+        child.on('error', (err) => {
+          resolve({ ok: false, error: 'Could not launch downloaded update: ' + err.message });
+        });
+        child.on('spawn', () => {
+          child.unref();
+          app.quit();
+          resolve({ ok: true });
+        });
+      });
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -1744,7 +1817,10 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'src/index.html'));
 
-  mainWindow.once('ready-to-show', () => {
+  let shown = false;
+  const showNow = () => {
+    if (shown || !mainWindow) return;
+    shown = true;
     closeSplash();
     mainWindow.show();
     mainWindow.focus();
@@ -1753,12 +1829,18 @@ function createWindow() {
     setTimeout(() => {
       performAutoUpdateCheck(mainWindow);
     }, 2500);
-  });
+  };
+
+  mainWindow.once('ready-to-show', showNow);
+
+  // Safety net: if ready-to-show never fires (renderer hang, GPU issue, etc.)
+  // force the window to show anyway after a short delay so the app never
+  // appears to be permanently "stuck" on the splash.
+  setTimeout(showNow, 8000);
 
   // Safety net: never leave the splash orphaned if the main window errors out.
-  // Use a long timeout (10 min) so the splash can survive a first-run model download.
   mainWindow.webContents.on('did-fail-load', () => closeSplash());
-  setTimeout(closeSplash, 600000);
+  setTimeout(closeSplash, 15000);
 
   mainWindow.on('closed', () => {
     mainWindow = null;

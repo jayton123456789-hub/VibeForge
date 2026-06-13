@@ -1860,10 +1860,9 @@ async function startRecordingAfterLink(sessionId) {
 async function renderShareView(content, actionsEl) {
   actionsEl.innerHTML = '';
   const status = await window.vibeforge.getPeerStatus();
-  const addr = status.address || '';
+  const roomCode = status.roomCode || status.address || '';
   const isHosting = status.status === 'hosting';
   const isConnected = status.status === 'connected';
-  const isOnline = isHosting || isConnected;
 
   const statusDot = isConnected
     ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;margin-right:6px;"></span>`
@@ -1871,15 +1870,15 @@ async function renderShareView(content, actionsEl) {
     ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 6px #f59e0b;margin-right:6px;"></span>`
     : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#52525b;margin-right:6px;"></span>`;
 
-  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting — waiting for Nick…' : 'Not connected';
+  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting — waiting for your collaborator…' : 'Not connected';
 
   let html = `
   <div style="max-width:540px;margin:0 auto;padding:8px 0;">
 
     <!-- Header -->
     <div style="margin-bottom:22px;">
-      <div style="font-size:22px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;margin-bottom:4px;">Link with Nick</div>
-      <div style="font-size:12px;color:#71717a;">Direct LAN connection — no cloud, no accounts. Both PCs must be on the same network.</div>
+      <div style="font-size:22px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;margin-bottom:4px;">Link Up</div>
+      <div style="font-size:12px;color:#71717a;">Real-time P2P connection — works across the internet, no cloud, no accounts.</div>
     </div>
 
     <!-- Status pill -->
@@ -1889,25 +1888,31 @@ async function renderShareView(content, actionsEl) {
 
     <!-- Host card -->
     <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🖥️ You're the Host</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Start hosting, then send the address to Nick. He pastes it in Join.</div>
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:2px;">🖥️ Host a Session</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:6px;">Works across the internet. The person with the beefier PC should host.</div>
+      <div style="font-size:10.5px;color:#52525b;margin-bottom:14px;">Host generates a room code — share it, your collaborator pastes it in Join. Powered by WebRTC — data goes peer-to-peer once connected.</div>
       ${isHosting || isConnected ? `
-        <div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;">
-          <span style="font-family:monospace;font-size:13px;color:#a78bfa;flex:1;word-break:break-all;">${esc(addr)}</span>
-          <button onclick="copyPeerAddress()" style="flex-shrink:0;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:11.5px;font-weight:600;cursor:pointer;">Copy</button>
+        <div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:12px 16px;margin-bottom:12px;">
+          <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Room Code</div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-family:monospace;font-size:20px;font-weight:700;color:#a78bfa;letter-spacing:.05em;flex:1;">${esc(roomCode)}</span>
+            <button onclick="copyPeerAddress()" style="flex-shrink:0;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;">Copy</button>
+          </div>
+          ${isHosting ? `<div style="font-size:11px;color:#f59e0b;margin-top:8px;">Share this code — waiting for someone to join…</div>` : ''}
+          ${isConnected ? `<div style="font-size:11px;color:#22c55e;margin-top:8px;">Connected!</div>` : ''}
         </div>
         <button onclick="window.vibeforge.duoDisconnect().then(()=>switchView('share'))" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;">Disconnect</button>
       ` : `
-        <button onclick="hostFromShare(this)" style="background:#6366f1;color:#fff;border:none;border-radius:10px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">Start Hosting</button>
+        <button onclick="hostFromShare(this)" style="background:#6366f1;color:#fff;border:none;border-radius:10px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">Generate Room Code</button>
       `}
     </div>
 
     <!-- Join card -->
     <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🔗 Join Nick's Session</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Nick starts hosting and sends you his address. Paste it below.</div>
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🔗 Join a Session</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">The host shares their room code. Paste it below and connect.</div>
       <div style="display:flex;gap:8px;">
-        <input id="join-addr-main" placeholder="192.168.x.x:48291" style="flex:1;background:#0d0d12;border:1px solid #3f3f46;border-radius:9px;padding:8px 12px;font-size:13px;color:#e2e8f0;outline:none;"
+        <input id="join-addr-main" placeholder="e.g. forge-4829" style="flex:1;background:#0d0d12;border:1px solid #3f3f46;border-radius:9px;padding:8px 12px;font-size:14px;color:#e2e8f0;outline:none;font-family:monospace;"
           onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)">
         <button onclick="doJoinFromShare(this)" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;">Join</button>
       </div>
@@ -1916,8 +1921,8 @@ async function renderShareView(content, actionsEl) {
     <!-- Send card (only when connected) -->
     ${isConnected ? `
     <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">📤 Send to Nick</div>
-      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Push your latest session notes or a file directly to his machine.</div>
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">📤 Send</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Push session notes or a file directly to your collaborator.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button onclick="sendCurrentSessionNotes()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send Session Notes</button>
         <button onclick="sendExportedBundle()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send File…</button>
@@ -1930,7 +1935,7 @@ async function renderShareView(content, actionsEl) {
         <div style="font-size:13px;font-weight:600;color:#e2e8f0;">📥 Received</div>
         <button onclick="revealReceivedFolder()" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;">Open folder</button>
       </div>
-      <div style="font-size:12px;color:#52525b;">
+      <div style="font-size:12px;">
         ${receivedItems.length ? receivedItems.map(item => `
           <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);">
             <span style="color:#a1a1aa;">${esc(item.type || 'item')}: ${esc(item.title || item.path || '')}</span>
@@ -1940,14 +1945,16 @@ async function renderShareView(content, actionsEl) {
       </div>
     </div>
 
-    <!-- Troubleshooting -->
+    <!-- How it works -->
     <details style="margin-top:4px;">
-      <summary style="font-size:11.5px;color:#52525b;cursor:pointer;user-select:none;padding:4px 0;">Troubleshooting / Firewall help</summary>
-      <div style="font-size:11px;color:#52525b;line-height:1.7;padding:10px 0 4px;">
-        • If Join fails, allow VibeForge (or Electron) through Windows Firewall → Private networks.<br>
-        • Use LAN IPs like <span style="font-family:monospace;">192.168.x.x</span> — not localhost.<br>
-        • Restart both apps after any firewall change.<br>
-        • Both machines must be on the same WiFi or LAN — hotspot works too.
+      <summary style="font-size:11.5px;color:#52525b;cursor:pointer;user-select:none;padding:4px 0;">How does this work?</summary>
+      <div style="font-size:11px;color:#52525b;line-height:1.8;padding:10px 0 4px;">
+        • Host clicks <strong style="color:#71717a;">Generate Room Code</strong> — gets a code like <span style="font-family:monospace;">forge-4829</span><br>
+        • Host shares that code (text, Discord, whatever)<br>
+        • Collaborator pastes it in Join and clicks Join<br>
+        • WebRTC connects you directly — no server in the middle after that<br>
+        • Works from any internet connection, any location<br>
+        • The person with the better PC / faster upload should host
       </div>
     </details>
 
