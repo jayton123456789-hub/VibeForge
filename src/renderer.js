@@ -25,8 +25,10 @@ let currentView = 'sessions';
 let projects = [];
 let peerStatus = { status: 'offline', address: '' };
 let receivedItems = [];
+let remoteVaultSnapshot = null;
 // Global timer ref so repeated quickStartRecording never stacks intervals
 let _globalTimerInterval = null;
+let _activeLiveSession = null;
 
 // Init
 async function init() {
@@ -307,6 +309,7 @@ async function switchProject(id) {
 
 // View switcher - every sidebar item calls this and has a real render
 async function switchView(view) {
+  stashActiveLiveRoomIfNeeded();
   currentView = view;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active', 'bg-zinc-900', 'text-white'));
   const nav = document.getElementById('nav-' + view);
@@ -1138,6 +1141,16 @@ window.confirmNewSession = async function() {
 // 6. Room Mode - real live session with premium recording workspace, screen/window picker, live transcript
 async function renderLiveRoom(session) {
   const content = document.getElementById('main-content');
+  const header = document.getElementById('view-title');
+  const actions = document.getElementById('view-actions');
+  currentView = 'live';
+  if (header) header.textContent = 'Recording';
+  if (actions) actions.innerHTML = '';
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active', 'bg-zinc-900', 'text-white'));
+  const stash = document.getElementById('active-live-stash');
+  if (stash) stash.innerHTML = '';
+  _activeLiveSession = { id: session.id, title: session.title, mode: session.mode, started_at: session.started_at || Date.now(), recording: true };
+  showActiveSessionIsland();
   let timerInterval;
   let notes = session.notes || '';
   let mediaRecorder = null;      // mic audio ONLY — never restarted, never combined
@@ -1471,6 +1484,13 @@ async function renderLiveRoom(session) {
   window.stopLiveRoom = async function(id) {
     clearInterval(timerInterval);
     _globalTimerInterval = null;
+    if (_activeLiveSession && _activeLiveSession.id === id) {
+      _activeLiveSession.recording = false;
+    }
+    const island = document.getElementById('active-session-island');
+    if (island) island.remove();
+    const stash = document.getElementById('active-live-stash');
+    if (stash) stash.innerHTML = '';
     if (captionTimer) { try { clearInterval(captionTimer); } catch(e){} captionTimer = null; }
     if (captionNode) { try { captionNode.disconnect(); } catch(e){} captionNode = null; }
     if (captionMute) { try { captionMute.disconnect(); } catch(e){} captionMute = null; }
@@ -1795,7 +1815,13 @@ async function renderLiveRoom(session) {
 async function renderDuoSetup(session) {
   // Store the session so the Link tab can start recording once linked
   window._pendingDuoSession = session;
-  showToast('Use Link to host/join. Once connected, start this Duo session from there.');
+  const status = await getDuoStatus();
+  if (status && status.status === 'connected') {
+    await sendLinkedSessionInvite(session);
+    showToast('Duo invite sent. Start when both sides are ready.');
+  } else {
+    showToast('Use Link to host/join. Once connected, start this Duo session from there.');
+  }
   await switchView('share');
 }
 
@@ -1832,6 +1858,32 @@ async function renderShareView(content, actionsEl) {
       </div>`;
   }).join('') : `<div class="rounded-2xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">Nothing received yet.</div>`;
 
+  const remoteVaultHtml = remoteVaultSnapshot ? `
+    <div class="mt-5 rounded-3xl border border-blue-500/25 bg-blue-500/10 p-5">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-[.16em] text-blue-300">Remote Vault</div>
+          <div class="mt-1 font-semibold text-white">${esc(remoteVaultSnapshot.projectName || 'Linked PC')}</div>
+          <div class="text-xs text-zinc-400">Snapshot received ${new Date(remoteVaultSnapshot.at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</div>
+        </div>
+        <button onclick="requestRemoteVault()" class="rounded-2xl border border-blue-500/40 px-4 py-2 text-sm text-blue-100 hover:bg-blue-500/10">Refresh</button>
+      </div>
+      <div class="mt-4 grid gap-2 md:grid-cols-4">
+        <div class="rounded-2xl border border-zinc-800 bg-black/25 p-3"><div class="text-2xl font-semibold text-white">${(remoteVaultSnapshot.sessions || []).length}</div><div class="text-[11px] text-zinc-500">Sessions</div></div>
+        <div class="rounded-2xl border border-zinc-800 bg-black/25 p-3"><div class="text-2xl font-semibold text-white">${(remoteVaultSnapshot.tasks || []).length}</div><div class="text-[11px] text-zinc-500">Tasks</div></div>
+        <div class="rounded-2xl border border-zinc-800 bg-black/25 p-3"><div class="text-2xl font-semibold text-white">${(remoteVaultSnapshot.decisions || []).length}</div><div class="text-[11px] text-zinc-500">Decisions</div></div>
+        <div class="rounded-2xl border border-zinc-800 bg-black/25 p-3"><div class="text-2xl font-semibold text-white">${(remoteVaultSnapshot.ideas || []).length}</div><div class="text-[11px] text-zinc-500">Ideas</div></div>
+      </div>
+      <div class="mt-4 max-h-48 space-y-2 overflow-auto">
+        ${(remoteVaultSnapshot.sessions || []).slice(0, 8).map(s => `<div class="rounded-2xl border border-zinc-800 bg-black/20 px-3 py-2 text-sm"><span class="text-blue-300">Session</span> <span class="text-zinc-200">${esc(s.title)}</span><div class="text-[11px] text-zinc-500">${formatSessionMeta(s)}</div></div>`).join('') || '<div class="text-xs text-zinc-500">No remote sessions in the snapshot.</div>'}
+      </div>
+    </div>` : `
+    <div class="mt-5 rounded-3xl border border-blue-500/20 bg-blue-500/5 p-5">
+      <div class="font-semibold text-white">Remote Vault</div>
+      <div class="mt-1 text-sm text-zinc-400">Ask the linked PC for a snapshot of their sessions, tasks, decisions, and ideas.</div>
+      <button onclick="requestRemoteVault()" class="mt-4 rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500">Request Remote Vault</button>
+    </div>`;
+
   const mirrorButtons = [
     ['sessions', 'Sessions', 'fa-list'],
     ['ideas', 'Ideas', 'fa-lightbulb'],
@@ -1859,7 +1911,7 @@ async function renderShareView(content, actionsEl) {
         <div class="mt-5 rounded-3xl border border-emerald-400/30 bg-black/30 p-5">
           <div class="font-semibold text-emerald-100">Duo session ready</div>
           <div class="mt-1 text-sm text-zinc-400">Start recording "${esc(window._pendingDuoSession.title)}" now that both sides are linked.</div>
-          <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button>
+          <button onclick="startPendingLinkedSession()" class="mt-4 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Start Linked Recording</button>
         </div>` : ''}
 
       <div class="mt-5 grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
@@ -1872,15 +1924,21 @@ async function renderShareView(content, actionsEl) {
         </div>
 
         <div class="rounded-3xl border border-zinc-800 bg-zinc-950/70 p-5">
-          <div class="font-semibold text-white">Send workspace payload</div>
-          <div class="mt-1 text-xs text-zinc-500">Quick proof that data moves through the Link.</div>
-          <div class="mt-4 grid gap-2">
+          <div class="font-semibold text-white">Link Vault</div>
+          <div class="mt-1 text-xs text-zinc-500">Drop files here or pick one. Received files save to each PC.</div>
+          <div id="link-vault-drop" class="mt-4 rounded-3xl border border-dashed border-cyan-500/40 bg-cyan-500/5 p-5 text-center text-sm text-zinc-300">
+            <i class="fa-solid fa-cloud-arrow-up mb-2 text-2xl text-cyan-300"></i>
+            <div class="font-semibold text-white">Drop files here</div>
+            <div class="mt-1 text-xs text-zinc-500">Zips, mp3s, exports, images, docs - folders should be zipped first.</div>
+            <button onclick="sendExportedBundle()" class="mt-4 rounded-2xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500">Choose File</button>
+          </div>
+          <div class="mt-3 grid gap-2">
             <button onclick="sendCurrentSessionNotes()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-note-sticky mr-2 text-purple-300"></i>Send latest session notes</button>
-            <button onclick="sendExportedBundle()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-file-arrow-up mr-2 text-cyan-300"></i>Send a file</button>
             <button onclick="sendLinkPing()" class="rounded-2xl border border-zinc-700 px-4 py-3 text-left text-sm text-zinc-100 hover:bg-zinc-800"><i class="fa-solid fa-satellite-dish mr-2 text-emerald-300"></i>Send test ping</button>
           </div>
         </div>
       </div>
+      ${remoteVaultHtml}
     </section>` : '';
 
   content.innerHTML = `
@@ -1931,6 +1989,7 @@ async function renderShareView(content, actionsEl) {
       </div>
     </div>
   `;
+  wireLinkVaultDrop();
 }
 window.copyPeerAddress = async function() {
   const status = await getDuoStatus();
@@ -2032,12 +2091,68 @@ window.sendExportedBundle = async function() {
   }
 };
 
+function wireLinkVaultDrop() {
+  const drop = document.getElementById('link-vault-drop');
+  if (!drop) return;
+  const active = 'border-cyan-300 bg-cyan-500/15';
+  drop.ondragover = (e) => {
+    e.preventDefault();
+    drop.classList.add(...active.split(' '));
+  };
+  drop.ondragleave = () => {
+    drop.classList.remove(...active.split(' '));
+  };
+  drop.ondrop = async (e) => {
+    e.preventDefault();
+    drop.classList.remove(...active.split(' '));
+    const files = Array.from(e.dataTransfer.files || []);
+    if (!files.length) return;
+    let sent = 0;
+    for (const file of files) {
+      const filePath = file.path;
+      if (!filePath) {
+        showToast('Drop from File Explorer so VibeForge can access the file path.');
+        continue;
+      }
+      const res = window.vibePeer ? await window.vibePeer.peerSendFile(filePath) : await window.vibeforge.peerSendFile(filePath);
+      if (res && res.ok) sent++;
+      else showToast('Could not send ' + file.name + ': ' + (res ? res.error : 'not connected'));
+    }
+    if (sent) showToast(`Sent ${sent} file${sent === 1 ? '' : 's'} through Link Vault`);
+  };
+}
+
 async function sendPeerJson(payload) {
   const msg = JSON.stringify(payload);
   const res = window.vibePeer ? await window.vibePeer.peerSendText(msg) : await window.vibeforge.peerSendText(msg);
   if (!res || !res.ok) showToast('Link send failed: ' + (res ? res.error : 'not connected'));
   return res;
 }
+
+async function sendLinkedSessionInvite(session) {
+  return await sendPeerJson({
+    type: 'duo-command',
+    command: 'session-invite',
+    session: {
+      title: session.title,
+      mode: session.mode || 'duo',
+      started_at: session.started_at || Date.now(),
+      projectName: currentProject ? currentProject.name : 'Linked Project'
+    }
+  });
+}
+
+window.startPendingLinkedSession = async function() {
+  const session = window._pendingDuoSession;
+  if (!session) {
+    showToast('No pending Duo session.');
+    return;
+  }
+  await sendLinkedSessionInvite(session);
+  window._pendingDuoSession = null;
+  showToast('Join invite sent. Starting your side.');
+  await renderLiveRoom(session);
+};
 
 window.mirrorViewToPeer = async function(view) {
   const allowed = ['sessions', 'ideas', 'tasks', 'decisions', 'timeline', 'memory'];
@@ -2053,6 +2168,26 @@ window.sendLinkPing = async function() {
   const res = await sendPeerJson({ type: 'duo-command', command: 'ping', at: Date.now() });
   if (res && res.ok) showToast('Ping sent through Link');
 };
+
+window.requestRemoteVault = async function() {
+  const res = await sendPeerJson({ type: 'duo-command', command: 'request-snapshot', at: Date.now() });
+  if (res && res.ok) showToast('Requested remote vault snapshot');
+};
+
+async function buildLocalVaultSnapshot() {
+  await ensureDefaultProject();
+  const projectId = currentProject.id;
+  return {
+    type: 'duo-command',
+    command: 'snapshot',
+    at: Date.now(),
+    projectName: currentProject.name,
+    sessions: (await window.vibeforge.getSessions(projectId)).slice(0, 50),
+    tasks: (await window.vibeforge.getTasks(projectId)).slice(0, 50),
+    decisions: (await window.vibeforge.getDecisions(projectId)).slice(0, 50),
+    ideas: (await window.vibeforge.getIdeas(projectId)).slice(0, 50)
+  };
+}
 
 async function handlePeerTextPayload(raw) {
   try {
@@ -2082,11 +2217,64 @@ async function handlePeerTextPayload(raw) {
         showToast('Link ping received');
         return true;
       }
+      if (data.command === 'session-invite' && data.session) {
+        await showLinkedSessionInvite(data.session);
+        return true;
+      }
+      if (data.command === 'request-snapshot') {
+        const snapshot = await buildLocalVaultSnapshot();
+        await sendPeerJson(snapshot);
+        showToast('Sent remote vault snapshot');
+        return true;
+      }
+      if (data.command === 'snapshot') {
+        remoteVaultSnapshot = data;
+        if (currentView === 'share') {
+          renderShareView(document.getElementById('main-content'), document.getElementById('view-actions'));
+        }
+        showToast('Remote vault snapshot received');
+        return true;
+      }
     }
   } catch (e) {
     console.log('Peer message:', raw);
   }
   return false;
+}
+
+async function showLinkedSessionInvite(remoteSession) {
+  document.querySelectorAll('.linked-session-invite').forEach(m => m.remove());
+  const title = remoteSession.title || 'Linked Session';
+  const projectName = remoteSession.projectName || 'their project';
+  const modal = document.createElement('div');
+  modal.className = 'linked-session-invite fixed inset-0 z-[500] flex items-center justify-center bg-black/75';
+  modal.innerHTML = `
+    <div class="w-full max-w-lg rounded-[28px] border border-emerald-500/30 bg-[#0b0f1d] p-6 shadow-2xl">
+      <div class="text-xs uppercase tracking-[.18em] text-emerald-300">Linked session invite</div>
+      <div class="mt-2 text-2xl font-semibold text-white">${esc(title)}</div>
+      <div class="mt-2 text-sm leading-6 text-zinc-400">Your linked collaborator started a Duo session from "${esc(projectName)}". Join it on this PC so both sides are recording the same conversation.</div>
+      <div class="mt-6 flex gap-3">
+        <button class="decline flex-1 rounded-2xl border border-zinc-700 py-3 text-sm font-semibold text-zinc-200 hover:bg-zinc-800">Not now</button>
+        <button class="accept flex-1 rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white hover:bg-emerald-500">Join Session</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('.decline').onclick = () => {
+    modal.remove();
+    showToast('Session invite dismissed');
+  };
+  modal.querySelector('.accept').onclick = async () => {
+    modal.remove();
+    await ensureDefaultProject();
+    const localSession = await window.vibeforge.createSession({
+      projectId: currentProject.id,
+      title,
+      mode: 'duo'
+    });
+    showToast('Joined linked Duo session');
+    await renderLiveRoom(localSession);
+  };
 }
 
 // Handle received files from peer (real path saved in main to received/)
@@ -3705,6 +3893,67 @@ function showProcessingBubble(sessionId) {
 async function updateActiveNav() {
   // Already handled in switchView
 }
+
+function getLiveStash() {
+  let stash = document.getElementById('active-live-stash');
+  if (!stash) {
+    stash = document.createElement('div');
+    stash.id = 'active-live-stash';
+    stash.style.display = 'none';
+    document.body.appendChild(stash);
+  }
+  return stash;
+}
+
+function stashActiveLiveRoomIfNeeded() {
+  if (!_activeLiveSession || !_activeLiveSession.recording || currentView !== 'live') return;
+  const content = document.getElementById('main-content');
+  if (!content || !content.childNodes.length) return;
+  const stash = getLiveStash();
+  while (content.firstChild) stash.appendChild(content.firstChild);
+}
+
+function showActiveSessionIsland() {
+  const old = document.getElementById('active-session-island');
+  if (old) old.remove();
+  if (!_activeLiveSession || !_activeLiveSession.recording) return;
+
+  const island = document.createElement('div');
+  island.id = 'active-session-island';
+  island.className = 'fixed bottom-5 left-1/2 -translate-x-1/2 z-[350] rounded-[24px] border border-red-400/50 bg-[#111421]/95 px-4 py-3 shadow-2xl shadow-red-950/40 flex items-center gap-4';
+  island.innerHTML = `
+    <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-red-500 text-white shadow-lg shadow-red-500/30">
+      <i class="fa-solid fa-square text-sm"></i>
+    </div>
+    <div class="min-w-[220px]">
+      <div class="text-xs font-semibold uppercase tracking-[.12em] text-red-300">Recording in progress</div>
+      <div class="max-w-[360px] truncate text-sm font-semibold text-white">${esc(_activeLiveSession.title || 'Live session')}</div>
+    </div>
+    <button onclick="returnToActiveSession()" class="rounded-2xl border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-100 hover:bg-zinc-800">Back to Session</button>
+    <button onclick="stopLiveRoom('${_activeLiveSession.id}')" class="rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500">Stop</button>
+  `;
+  document.body.appendChild(island);
+}
+
+window.returnToActiveSession = function() {
+  if (!_activeLiveSession || !_activeLiveSession.recording) {
+    showToast('No active recording to return to.');
+    return;
+  }
+  const content = document.getElementById('main-content');
+  const header = document.getElementById('view-title');
+  const actions = document.getElementById('view-actions');
+  const stash = getLiveStash();
+  if (content && stash.childNodes.length) {
+    content.innerHTML = '';
+    while (stash.firstChild) content.appendChild(stash.firstChild);
+  }
+  currentView = 'live';
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active', 'bg-zinc-900', 'text-white'));
+  if (header) header.textContent = 'Recording';
+  if (actions) actions.innerHTML = '';
+  showActiveSessionIsland();
+};
 
 // === Live service status dots (top bar) ===
 // green = ready to use, amber = running but needs a step, gray = off/not set up.
