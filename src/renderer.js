@@ -12,6 +12,14 @@ function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+// First MediaRecorder mimeType the platform actually supports, from a preference list.
+function pickMime(list) {
+  for (const m of list) {
+    try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m; } catch (e) {}
+  }
+  return '';
+}
+
 let currentProject = null;
 let currentView = 'sessions';
 let projects = [];
@@ -569,6 +577,7 @@ async function openSession(id) {
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
           <div class="font-semibold mb-3">Recording</div>
           ${s.audio_path ? `<audio controls src="file://${s.audio_path}" class="w-full" style="height:38px"></audio><div class="mt-2 text-xs text-zinc-500 truncate">${esc(mediaName)}</div>` : '<div class="text-sm text-zinc-500">No audio file saved for this session.</div>'}
+          ${s.screen_path ? `<div class="mt-4 text-xs text-zinc-400 mb-1"><i class="fa-solid fa-desktop mr-1"></i>Screen capture</div><video controls src="file://${s.screen_path}" class="w-full rounded-xl bg-black max-h-64"></video>` : ''}
         </div>
 
         <div class="rounded-[24px] border border-zinc-700/50 bg-[#0b0f1d]/90 p-5">
@@ -1086,8 +1095,10 @@ async function renderLiveRoom(session) {
   const content = document.getElementById('main-content');
   let timerInterval;
   let notes = session.notes || '';
-  let mediaRecorder = null;
+  let mediaRecorder = null;      // mic audio ONLY — never restarted, never combined
   let audioChunks = [];
+  let screenRecorder = null;     // screen video → its own file (independent of mic)
+  let screenChunks = [];
   let audioContext = null;
   let analyser = null;
   let isRecording = false;
@@ -1095,7 +1106,9 @@ async function renderLiveRoom(session) {
   let displayStream = null;
   let captureLabel = 'Mic only';
   let liveTranscript = '';
-  // Live caption state (real local Whisper, chunked)
+  // Live caption state (real local Whisper, chunked) — runs on its OWN audio context
+  // fed by a cloned mic track, so it can never disturb the recording.
+  let captionCtx = null;
   let captionNode = null;
   let captionMute = null;
   let captionTimer = null;
@@ -1322,6 +1335,7 @@ async function renderLiveRoom(session) {
   window.pickScreenForLive = async function() {
     try {
       const ds = await getDesktopStream('screen');
+      try { if (displayStream) displayStream.getTracks().forEach(t => t.stop()); } catch (e) {}
       displayStream = ds;
       const vt = ds.getVideoTracks()[0];
       const nice = vt ? (vt.label || vt.getSettings().displaySurface || 'Display') : 'System audio only';
@@ -1342,25 +1356,12 @@ async function renderLiveRoom(session) {
       }
       if (prev) prev.srcObject = ds;
 
-      showToast('Screen set: ' + captureLabel + '. ' + (isRecording ? 'Switching source...' : ''));
-
-      if (isRecording && mediaRecorder && micStream) {
-        // mid-session switch: flush, stop current recorder (chunks kept), restart with combined
-        try {
-          mediaRecorder.requestData();
-          mediaRecorder.stop();
-        } catch(e){}
-        const auds = [...micStream.getAudioTracks(), ...ds.getAudioTracks()];
-        const vids = ds.getVideoTracks();
-        const combined = new MediaStream([...auds, ...vids]);
-        mediaRecorder = new MediaRecorder(combined);
-        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-        mediaRecorder.onstop = () => {
-          try { combined.getTracks().forEach(t => t.stop()); } catch(e){}
-        };
-        mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
-        showToast('Now capturing: ' + captureLabel);
-      }
+      showToast('Screen set: ' + captureLabel);
+      // Record the screen to its OWN file. The mic recorder is never touched.
+      startScreenRecorder(ds);
+      // If user re-picks while screen-recording was paused, restart the live preview ended handler
+      const vtrk = ds.getVideoTracks()[0];
+      if (vtrk) vtrk.onended = () => { stopScreenRecorder(); updateCaptureUI('Mic only'); };
     } catch (e) {
       showToast('Screen pick: ' + (e.message || 'cancelled'));
     }
@@ -1370,6 +1371,7 @@ async function renderLiveRoom(session) {
   window.pickWindowForLive = async function() {
     try {
       const ds = await getDesktopStream('window');
+      try { if (displayStream) displayStream.getTracks().forEach(t => t.stop()); } catch (e) {}
       displayStream = ds;
       const vt = ds.getVideoTracks()[0];
       const nice = vt ? (vt.label || 'Window') : 'Window audio';
@@ -1387,21 +1389,39 @@ async function renderLiveRoom(session) {
         }
       }
       if (prev) prev.srcObject = ds;
-      showToast('Window capture set. ' + (isRecording ? 'Switching source...' : ''));
-      if (isRecording && mediaRecorder && micStream) {
-        try { mediaRecorder.requestData(); mediaRecorder.stop(); } catch(e){}
-        const auds = [...micStream.getAudioTracks(), ...ds.getAudioTracks()];
-        const vids = ds.getVideoTracks();
-        const combined = new MediaStream([...auds, ...vids]);
-        mediaRecorder = new MediaRecorder(combined);
-        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-        mediaRecorder.onstop = () => { try { combined.getTracks().forEach(t => t.stop()); } catch(e){} };
-        mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
-      }
+      showToast('Window capture set.');
+      startScreenRecorder(ds);
+      const vtrk = ds.getVideoTracks()[0];
+      if (vtrk) vtrk.onended = () => { stopScreenRecorder(); updateCaptureUI('Mic only'); };
     } catch (e) {
       showToast('Window pick: ' + (e.message || 'cancelled'));
     }
   };
+
+  // Screen recording goes to its OWN MediaRecorder/file. Independent of the mic recorder,
+  // so picking/changing/stopping the screen can never corrupt the audio of record.
+  function startScreenRecorder(ds) {
+    stopScreenRecorder();
+    try {
+      const vids = ds.getVideoTracks();
+      if (!vids.length) return;
+      const sysAudio = ds.getAudioTracks();
+      const stream = new MediaStream([...vids, ...sysAudio]);
+      screenChunks = [];
+      screenRecorder = new MediaRecorder(stream, { mimeType: pickMime(['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']) });
+      screenRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) screenChunks.push(e.data); };
+      screenRecorder.onerror = (ev) => { console.error('screen recorder error', ev.error); };
+      screenRecorder.start(1000);
+    } catch (e) {
+      showToast('Screen record failed: ' + e.message);
+      screenRecorder = null;
+    }
+  }
+  function stopScreenRecorder() {
+    if (screenRecorder && screenRecorder.state !== 'inactive') {
+      try { screenRecorder.requestData(); screenRecorder.stop(); } catch (e) {}
+    }
+  }
 
   window.stopLiveRoom = async function(id) {
     clearInterval(timerInterval);
@@ -1409,22 +1429,35 @@ async function renderLiveRoom(session) {
     if (captionTimer) { try { clearInterval(captionTimer); } catch(e){} captionTimer = null; }
     if (captionNode) { try { captionNode.disconnect(); } catch(e){} captionNode = null; }
     if (captionMute) { try { captionMute.disconnect(); } catch(e){} captionMute = null; }
+    if (captionCtx) { try { captionCtx.close(); } catch(e){} captionCtx = null; }
+
+    // Stop the mic recorder, waiting for the final chunk to flush.
     if (isRecording && mediaRecorder) {
       try {
         if (mediaRecorder.state !== 'inactive') {
           await new Promise((resolve) => {
-            const prevStop = mediaRecorder.onstop;
-            mediaRecorder.onstop = (ev) => {
-              try { if (prevStop) prevStop(ev); } catch (_) {}
-              resolve();
-            };
+            mediaRecorder.onstop = () => resolve();
             try { mediaRecorder.requestData(); } catch (_) {}
             try { mediaRecorder.stop(); } catch (_) { resolve(); }
-            setTimeout(resolve, 1200);
+            setTimeout(resolve, 1500);
           });
         }
       } catch(e){}
       isRecording = false;
+    }
+
+    // Stop the screen recorder (if any), waiting for its final chunk too.
+    if (screenRecorder) {
+      try {
+        if (screenRecorder.state !== 'inactive') {
+          await new Promise((resolve) => {
+            screenRecorder.onstop = () => resolve();
+            try { screenRecorder.requestData(); } catch (_) {}
+            try { screenRecorder.stop(); } catch (_) { resolve(); }
+            setTimeout(resolve, 1500);
+          });
+        }
+      } catch (e) {}
     }
 
     // stop any display/mic tracks
@@ -1442,15 +1475,26 @@ async function renderLiveRoom(session) {
       await window.vibeforge.updateSessionEnded(id, Date.now());
     } catch (e) {}
 
-    // final save of accumulated recording (supports mid-session screen changes)
+    // Save the mic audio (the audio of record).
     if (audioChunks && audioChunks.length > 0) {
       try {
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const audioBlob = new Blob(audioChunks, { type: mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'audio/webm' });
         const arrayBuffer = await audioBlob.arrayBuffer();
         const savedPath = await window.vibeforge.saveAudio(id, arrayBuffer);
         await window.vibeforge.updateSessionAudio(id, savedPath);
       } catch (e) {
         showToast('Audio save issue: ' + e.message);
+      }
+    }
+
+    // Save the screen recording to its own file (if one was captured).
+    if (screenChunks && screenChunks.length > 0) {
+      try {
+        const vblob = new Blob(screenChunks, { type: 'video/webm' });
+        const vbuf = await vblob.arrayBuffer();
+        await window.vibeforge.saveScreen(id, vbuf);
+      } catch (e) {
+        showToast('Screen save issue: ' + e.message);
       }
     }
 
@@ -1557,34 +1601,25 @@ async function renderLiveRoom(session) {
           autoGainControl: true
         }
       });
-      let recStream = micStream;
-
-      // if a screen was picked *before* we got here, combine now
-      if (displayStream) {
-        const auds = [...micStream.getAudioTracks(), ...displayStream.getAudioTracks()];
-        const vids = displayStream.getVideoTracks();
-        recStream = new MediaStream([...auds, ...vids]);
-        const vt = displayStream.getVideoTracks()[0];
-        if (vt) updateCaptureUI((vt.label || 'Display') + ' + mic');
-      }
-
-      mediaRecorder = new MediaRecorder(recStream);
+      // THE RECORDING: mic audio only, one MediaRecorder, never restarted or combined.
+      // This is the audio of record and nothing else is allowed to touch it.
       audioChunks = [];
-
-      mediaRecorder.ondataavailable = e => {
-        if (e.data.size > 0) audioChunks.push(e.data);
+      mediaRecorder = new MediaRecorder(micStream, { mimeType: pickMime(['audio/webm;codecs=opus','audio/webm']) });
+      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) audioChunks.push(e.data); };
+      mediaRecorder.onerror = (ev) => {
+        console.error('mic recorder error', ev.error);
+        showToast('Recording hiccup — restarting capture...');
+        try { if (mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch (e) {}
       };
-
-      mediaRecorder.onstop = () => {
-        // only cleanup here; full save happens in stopLiveRoom so mid-switch works
-        try { recStream.getTracks().forEach(t => t.stop()); } catch(e){}
-      };
-
+      mediaRecorder.onstop = () => { /* tracks stopped in stopLiveRoom */ };
       mediaRecorder.start(1000); // flush a chunk every 1s: resilient + correct webm duration
       isRecording = true;
-      if (micStatus) micStatus.textContent = 'Recording... (screen/mic)';
+      if (micStatus) micStatus.textContent = 'Recording...';
 
-      // Mic level (always on the mic source)
+      // If a screen was already chosen before we got here, record it to its own file now.
+      if (displayStream) startScreenRecorder(displayStream);
+
+      // Mic level meter on a lightweight analyser (separate context so it can't affect capture)
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(micStream);
       analyser = audioContext.createAnalyser();
@@ -1620,33 +1655,39 @@ async function renderLiveRoom(session) {
       try {
         const wCheck = await window.vibeforge.whisperCheck();
         if (tEl && wCheck && wCheck.configured) {
-          captionRate = audioContext.sampleRate;
-          captionNode = audioContext.createScriptProcessor(4096, 1, 1);
+          // Isolated caption pipeline: a SEPARATE AudioContext fed by a CLONED mic track.
+          // Nothing here shares the recording's audio graph, so captions can never
+          // glitch or starve the actual recording.
+          const micTrack = micStream.getAudioTracks()[0];
+          const capStream = new MediaStream([micTrack.clone()]);
+          captionCtx = new (window.AudioContext || window.webkitAudioContext)();
+          captionRate = captionCtx.sampleRate;
+          const capSource = captionCtx.createMediaStreamSource(capStream);
+          captionNode = captionCtx.createScriptProcessor(4096, 1, 1);
           captionNode.onaudioprocess = (ev) => {
             const data = ev.inputBuffer.getChannelData(0);
             captionBuf.push(new Float32Array(data));
             captionBufLen += data.length;
-            // cap backlog at ~30s so a slow machine can't spiral
-            while (captionBufLen > captionRate * 30 && captionBuf.length > 1) {
+            // Hard cap backlog at ~6s and DROP the oldest — never let whisper fall behind
+            // and spiral into chewing huge clips (that was the ~60s recording-death bug).
+            while (captionBufLen > captionRate * 6 && captionBuf.length > 1) {
               captionBufLen -= captionBuf.shift().length;
             }
           };
-          // CRITICAL: a ScriptProcessor only fires onaudioprocess while it reaches the
-          // destination — but connecting the mic to the speakers creates a feedback
-          // squeal that the mic re-records. Route it through a zero-gain node so the
-          // graph is pulled but absolutely nothing is audible. Never connect mic->dest.
-          captionMute = audioContext.createGain();
+          // ScriptProcessor must reach a destination to fire; route through zero gain so
+          // nothing is ever audible (no mic->speaker feedback).
+          captionMute = captionCtx.createGain();
           captionMute.gain.value = 0;
-          source.connect(captionNode);
+          capSource.connect(captionNode);
           captionNode.connect(captionMute);
-          captionMute.connect(audioContext.destination);
+          captionMute.connect(captionCtx.destination);
 
           tEl.innerHTML = '<span class="text-zinc-500 text-xs">Listening... captions appear a few seconds behind speech.</span>';
           let firstCaption = true;
 
           captionTimer = setInterval(async () => {
             if (captionBusy) return;
-            if (captionBufLen < captionRate * 2.6) return; // faster live captions, still enough context for Whisper
+            if (captionBufLen < captionRate * 3.5) return; // ~3.5s window: enough context, not greedy
             const merged = new Float32Array(captionBufLen);
             let o = 0;
             for (const c of captionBuf) { merged.set(c, o); o += c.length; }
@@ -1660,7 +1701,7 @@ async function renderLiveRoom(session) {
             captionBusy = true;
             try {
               const wav = encodeWav16k(resampleTo16k(merged, captionRate));
-              const res = await window.vibeforge.transcribeWav({ wav });
+              const res = await window.vibeforge.transcribeWav({ wav, live: true });
               if (res && res.ok && res.transcript) {
                 const text = res.transcript.replace(/\s+/g, ' ').trim();
                 if (text) {
@@ -1680,7 +1721,7 @@ async function renderLiveRoom(session) {
             } catch (e) {} finally {
               captionBusy = false;
             }
-          }, 2000);
+          }, 3000);
 
           if (micStatus) micStatus.textContent = 'Recording + live Whisper captions';
         } else if (tEl) {

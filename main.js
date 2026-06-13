@@ -229,6 +229,9 @@ function initDb() {
   const stmt = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   defaults.forEach(([k, v]) => stmt.run(k, v));
 
+  // Migration: separate screen recording file per session (mic audio stays in audio_path)
+  try { db.exec(`ALTER TABLE sessions ADD COLUMN screen_path TEXT`); } catch (e) { /* exists */ }
+
   // Migration: add status to ideas for Inbox/Saved/etc (no demo, safe)
   try {
     db.exec(`ALTER TABLE ideas ADD COLUMN status TEXT DEFAULT 'Inbox'`);
@@ -338,6 +341,21 @@ function registerIpc() {
     fs.writeFileSync(filePath, Buffer.from(buffer));
     db.prepare('UPDATE sessions SET audio_path = ? WHERE id = ?').run(filePath, sessionId);
     return filePath;
+  });
+
+  // Screen recording saved as its own file so it never corrupts the mic audio.
+  ipcMain.handle('save-screen', async (e, { sessionId, buffer }) => {
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings', sessionId);
+    if (!fs.existsSync(recordingsDir)) fs.mkdirSync(recordingsDir, { recursive: true });
+    const filePath = path.join(recordingsDir, `screen-${Date.now()}.webm`);
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    db.prepare('UPDATE sessions SET screen_path = ? WHERE id = ?').run(filePath, sessionId);
+    return filePath;
+  });
+
+  ipcMain.handle('update-session-screen', (e, { id, screen_path }) => {
+    db.prepare('UPDATE sessions SET screen_path = ? WHERE id = ?').run(screen_path, id);
+    return true;
   });
 
   ipcMain.handle('get-decisions-by-session', (e, sessionId) => {
@@ -1155,7 +1173,7 @@ function registerIpc() {
 
   // Transcribe a 16kHz mono WAV buffer sent from the renderer.
   // Used both for live caption chunks and full post-session transcription.
-  ipcMain.handle('transcribe-wav', async (e, { wav, sessionId, appendToNotes }) => {
+  ipcMain.handle('transcribe-wav', async (e, { wav, sessionId, appendToNotes, live }) => {
     const cli = findWhisperCli();
     const model = getWhisperModelPath();
     if (!cli || !fs.existsSync(model)) {
@@ -1170,11 +1188,15 @@ function registerIpc() {
       return { ok: false, error: 'Failed to write temp wav: ' + err.message };
     }
     // Initial prompt biases Whisper toward vocabulary we actually use, so dev terms
-    // and tool names get spelled right instead of guessed phonetically.
+    // and tool names get spelled right instead of guessed phonetically. Including a few
+    // expletives verbatim stops the model from self-censoring real speech.
     const vocab = getSetting('whisper_prompt') ||
-      'VibeForge, Codex, Claude, Cursor, Ollama, Whisper, GitHub, Electron, Node.js, npm, API, repo, UI, UX, frontend, backend, database, SQLite, localhost, WebSocket, Nick, Jayton, Dylan.';
+      'Real talk, no censoring — shit, damn, hell, ass, fuck, crap. VibeForge, Codex, Claude, Cursor, Ollama, Whisper, GitHub, Electron, Node.js, npm, API, repo, frontend, backend, SQLite, WebSocket, Nick, Jayton, Dylan.';
+    // Live caption passes use FEWER threads so they never peg the CPU and starve the
+    // audio recorder. Final/manual transcription gets more threads for speed.
+    const threads = live ? '2' : '4';
     return new Promise((resolve) => {
-      const args = ['-m', model, '-f', wavPath, '-l', 'en', '-nt', '-np', '-t', '4', '--prompt', vocab];
+      const args = ['-m', model, '-f', wavPath, '-l', 'en', '-nt', '-np', '-t', threads, '--prompt', vocab];
       const proc = spawn(cli, args, { shell: false, windowsHide: true });
       let out = '';
       let errOut = '';
