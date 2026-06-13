@@ -112,6 +112,7 @@ let db;
 let peerServer = null;
 let peerClient = null;
 let currentPeer = null; // { type: 'host' | 'client', address: string, ws: ws }
+let hostAddress = null; // stored when duoHost() starts so get-peer-status can return it immediately
 
 // Config for tray/close later, but minimal now - always quit on close
 let appConfig = {};
@@ -689,6 +690,7 @@ function registerIpc() {
     }
     const port = 48290 + Math.floor(Math.random() * 100);
     const ip = getLocalIP();
+    hostAddress = `${ip}:${port}`;
     peerServer = new WebSocket.Server({ port });
 
     peerServer.on('connection', (ws) => {
@@ -759,13 +761,14 @@ function registerIpc() {
     if (peerServer) { try { peerServer.close(); } catch (e) {} peerServer = null; }
     if (peerClient) { try { peerClient.close(); } catch (e) {} peerClient = null; }
     currentPeer = null;
+    hostAddress = null;
     if (mainWindow) mainWindow.webContents.send('peer-status', { status: 'disconnected' });
     return true;
   });
 
   ipcMain.handle('get-peer-status', () => {
     if (currentPeer) return { status: 'connected', address: currentPeer.address, type: currentPeer.type };
-    if (peerServer) return { status: 'hosting' };
+    if (peerServer) return { status: 'hosting', address: hostAddress };
     return { status: 'offline' };
   });
 

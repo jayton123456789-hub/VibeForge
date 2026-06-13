@@ -1860,60 +1860,98 @@ async function startRecordingAfterLink(sessionId) {
 async function renderShareView(content, actionsEl) {
   actionsEl.innerHTML = '';
   const status = await window.vibeforge.getPeerStatus();
-  let html = `<div class="font-semibold text-xl mb-3">Share</div>`;
+  const addr = status.address || '';
+  const isHosting = status.status === 'hosting';
+  const isConnected = status.status === 'connected';
+  const isOnline = isHosting || isConnected;
 
-  html += `<div class="mb-3 p-3 bg-zinc-900 border border-zinc-800 rounded-2xl text-xs">Jayton clicks Host. Nick opens VibeForge &gt; Share &gt; Join and pastes the address shown here. Both PCs must be on the same local network (WiFi/LAN). Real WebSocket transfer - no cloud.</div>`;
+  const statusDot = isConnected
+    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;margin-right:6px;"></span>`
+    : isHosting
+    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 6px #f59e0b;margin-right:6px;"></span>`
+    : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#52525b;margin-right:6px;"></span>`;
 
-  if (status.status === 'hosting') {
-    html += `<div class="p-3 bg-emerald-950 border border-emerald-700 rounded-3xl mb-3">HOSTING at <span class="font-mono">${status.address || 'local network'}</span>. Tell Nick the address and have him Join.</div>`;
-  } else if (status.status === 'connected') {
-    html += `<div class="p-3 bg-emerald-950 border border-emerald-700 rounded-3xl mb-3">CONNECTED to ${status.address}. Ready to send/receive.</div>`;
-  } else {
-    html += `<div class="text-zinc-400 mb-3">Offline. Host or Join to link.</div>`;
-  }
+  const statusLabel = isConnected ? 'Connected' : isHosting ? 'Hosting — waiting for Nick…' : 'Not connected';
 
-  html += `
-    <div class="flex gap-2 mb-3">
-      <button onclick="hostFromShare(this)" class="px-5 py-2 bg-white text-black rounded-2xl text-sm font-semibold">Host</button>
-      <button onclick="showJoinInput(this)" class="px-5 py-2 border border-zinc-700 rounded-2xl text-sm">Join</button>
-      ${status.status !== 'offline' ? `<button onclick="window.vibeforge.duoDisconnect(); switchView('share')" class="px-5 py-2 border border-red-700 text-red-400 rounded-2xl text-sm">Disconnect</button>` : ''}
+  let html = `
+  <div style="max-width:540px;margin:0 auto;padding:8px 0;">
+
+    <!-- Header -->
+    <div style="margin-bottom:22px;">
+      <div style="font-size:22px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;margin-bottom:4px;">Link with Nick</div>
+      <div style="font-size:12px;color:#71717a;">Direct LAN connection — no cloud, no accounts. Both PCs must be on the same network.</div>
     </div>
-    <div id="share-extra" class="mb-3"></div>
-  `;
 
-  if (status.status === 'hosting' || status.status === 'connected') {
-    html += `<button onclick="copyPeerAddress()" class="mb-3 px-3 py-1 text-xs border border-zinc-700 rounded-xl">Copy Address</button>`;
-  }
+    <!-- Status pill -->
+    <div style="display:inline-flex;align-items:center;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:999px;padding:5px 14px;font-size:12px;color:#a1a1aa;margin-bottom:20px;">
+      ${statusDot}${esc(statusLabel)}
+    </div>
 
-  if (status.status === 'connected') {
-    html += `
-      <div class="mt-2">
-        <div class="font-medium mb-1 text-sm">Send to Nick</div>
-        <button onclick="sendCurrentSessionNotes()" class="px-4 py-2 text-xs border border-zinc-700 rounded-2xl">Send Current Session Notes</button>
-        <button onclick="sendExportedBundle()" class="ml-2 px-4 py-2 text-xs border border-zinc-700 rounded-2xl">Send Exported Project Bundle / File</button>
+    <!-- Host card -->
+    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🖥️ You're the Host</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Start hosting, then send the address to Nick. He pastes it in Join.</div>
+      ${isHosting || isConnected ? `
+        <div style="background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;">
+          <span style="font-family:monospace;font-size:13px;color:#a78bfa;flex:1;word-break:break-all;">${esc(addr)}</span>
+          <button onclick="copyPeerAddress()" style="flex-shrink:0;background:#6366f1;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:11.5px;font-weight:600;cursor:pointer;">Copy</button>
+        </div>
+        <button onclick="window.vibeforge.duoDisconnect().then(()=>switchView('share'))" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;">Disconnect</button>
+      ` : `
+        <button onclick="hostFromShare(this)" style="background:#6366f1;color:#fff;border:none;border-radius:10px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">Start Hosting</button>
+      `}
+    </div>
+
+    <!-- Join card -->
+    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">🔗 Join Nick's Session</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Nick starts hosting and sends you his address. Paste it below.</div>
+      <div style="display:flex;gap:8px;">
+        <input id="join-addr-main" placeholder="192.168.x.x:48291" style="flex:1;background:#0d0d12;border:1px solid #3f3f46;border-radius:9px;padding:8px 12px;font-size:13px;color:#e2e8f0;outline:none;"
+          onkeydown="if(event.key==='Enter')doJoinFromShare(this.nextElementSibling)">
+        <button onclick="doJoinFromShare(this)" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;">Join</button>
       </div>
-    `;
-  }
+    </div>
 
-  html += `
-    <div class="mt-4">
-      <div class="font-medium mb-1 text-sm">Received Items</div>
-      <button onclick="revealReceivedFolder()" class="mb-2 px-3 py-1 text-xs border border-zinc-700 rounded-xl">Reveal Received Folder</button>
-      <div id="received-list" class="text-xs text-zinc-400 bg-zinc-950 p-2 rounded">
+    <!-- Send card (only when connected) -->
+    ${isConnected ? `
+    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:4px;">📤 Send to Nick</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">Push your latest session notes or a file directly to his machine.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="sendCurrentSessionNotes()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send Session Notes</button>
+        <button onclick="sendExportedBundle()" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:7px 16px;font-size:12px;cursor:pointer;">Send File…</button>
+      </div>
+    </div>` : ''}
+
+    <!-- Received -->
+    <div style="background:#111118;border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:20px;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:13px;font-weight:600;color:#e2e8f0;">📥 Received</div>
+        <button onclick="revealReceivedFolder()" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;">Open folder</button>
+      </div>
+      <div style="font-size:12px;color:#52525b;">
         ${receivedItems.length ? receivedItems.map(item => `
-          <div class="py-0.5">${item.type || 'item'}: ${item.title || item.path || ''} ${item.path ? `<button onclick="revealSpecificReceived('${item.path.replace(/\\/g,'\\\\')}')" class="underline ml-1">reveal</button>` : ''}</div>
-        `).join('') : 'Nothing received yet.'}
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);">
+            <span style="color:#a1a1aa;">${esc(item.type || 'item')}: ${esc(item.title || item.path || '')}</span>
+            ${item.path ? `<button onclick="revealSpecificReceived('${item.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')"
+              style="background:transparent;border:none;color:#6366f1;font-size:11px;cursor:pointer;text-decoration:underline;">reveal</button>` : ''}
+          </div>`).join('') : '<span style="color:#3f3f46;">Nothing received yet.</span>'}
       </div>
     </div>
 
-    <div class="mt-4 text-xs text-zinc-500 border-t border-zinc-800 pt-3">
-      <div class="font-medium mb-1">Windows Firewall / Troubleshooting</div>
-      - If Join fails: allow VibeForge (or node/electron) through Windows Firewall for Private networks.<br>
-      - Use LAN IPs (192.168.x.x or 10.x), not localhost.<br>
-      - Restart both apps after firewall change.<br>
-      - Test with a simple ping first if network is blocked.
-    </div>
-  `;
+    <!-- Troubleshooting -->
+    <details style="margin-top:4px;">
+      <summary style="font-size:11.5px;color:#52525b;cursor:pointer;user-select:none;padding:4px 0;">Troubleshooting / Firewall help</summary>
+      <div style="font-size:11px;color:#52525b;line-height:1.7;padding:10px 0 4px;">
+        • If Join fails, allow VibeForge (or Electron) through Windows Firewall → Private networks.<br>
+        • Use LAN IPs like <span style="font-family:monospace;">192.168.x.x</span> — not localhost.<br>
+        • Restart both apps after any firewall change.<br>
+        • Both machines must be on the same WiFi or LAN — hotspot works too.
+      </div>
+    </details>
+
+  </div>`;
 
   content.innerHTML = html;
 }
@@ -1941,27 +1979,23 @@ window.revealSpecificReceived = function(p) {
 
 async function hostFromShare(btn) {
   btn.disabled = true;
+  btn.textContent = 'Starting…';
   const res = await window.vibeforge.duoHost();
   showToast('Hosting on ' + res.address);
   await switchView('share');
 }
 
-function showJoinInput(btn) {
-  const extra = document.getElementById('share-extra');
-  extra.innerHTML = `
-    <div class="flex gap-2 mt-2">
-      <input id="join-addr2" placeholder="192.168.x.x:48291" class="flex-1 bg-zinc-900 border border-zinc-700 rounded-2xl px-3 py-2 text-sm">
-      <button onclick="doJoinFromShare(this)" class="px-4 border border-zinc-700 rounded-2xl">Join</button>
-    </div>
-  `;
-}
+// showJoinInput removed — join input is now always visible inline in renderShareView
 
 async function doJoinFromShare(btn) {
-  const addr = document.getElementById('join-addr2').value.trim();
-  if (!addr) return;
+  const input = document.getElementById('join-addr-main');
+  const addr = input ? input.value.trim() : '';
+  if (!addr) { showToast('Paste an address first'); return; }
   btn.disabled = true;
+  btn.textContent = 'Joining…';
   const res = await window.vibeforge.duoJoin(addr);
-  if (res.ok) showToast('Connected'); else showToast('Failed: ' + res.error);
+  if (res.ok) showToast('Connected to ' + addr);
+  else showToast('Failed: ' + res.error);
   await switchView('share');
 }
 
