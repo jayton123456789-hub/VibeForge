@@ -252,10 +252,13 @@
 
   <!-- Global update banner (auto on launch + from manual Check). Big, friendly, green. -->
   <div id="update-banner" class="hidden fixed top-9 left-0 right-0 bg-emerald-600 text-white px-4 py-3 z-[100] items-center justify-between shadow-lg text-sm">
-    <div><span class="font-semibold">UPDATE AVAILABLE</span> — WANNA RELOAD?</div>
+    <div><span class="font-semibold">UPDATE AVAILABLE</span> - WANNA RELOAD?</div>
     <button id="do-update-btn" class="bg-white text-emerald-700 font-semibold px-5 py-1.5 rounded-xl active:scale-95">YES, DOWNLOAD &amp; RELOAD</button>
   </div>
 
+  <!-- PeerJS must load before renderer.js so Duo Link never falls back to IPC stubs. -->
+  <script src="vendor/peerjs.min.js"></script>
+  <script>if (!window.Peer) document.write('<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"><\/script>');</script>
   <script src="renderer.js"></script>
 </body>
 </html>

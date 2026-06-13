@@ -1794,72 +1794,20 @@ async function renderLiveRoom(session) {
   // the late assignments were removed to avoid duplication)
 }
 
-// 7. Duo Setup - real host/join with WebSocket
+// 7. Duo Setup - redirects to the Share tab (PeerJS room-code based)
+// The old IP-based WebSocket UI is replaced. Duo sessions now use the
+// Share tab's Generate Room Code / Join flow which works over the internet.
 async function renderDuoSetup(session) {
-  const content = document.getElementById('main-content');
-  content.innerHTML = `
-    <div class="max-w-lg">
-      <div class="mb-4">Duo / Link Mode - ${esc(session.title)}</div>
-      
-      <div class="grid grid-cols-2 gap-4">
-        <div class="bg-[#111113] border border-zinc-700 rounded-3xl p-5">
-          <div class="font-medium mb-3">Host Session</div>
-          <button onclick="hostDuo('${session.id}', this)" class="w-full py-2 bg-white text-black rounded-2xl text-sm font-semibold">Start Hosting</button>
-          <div id="host-info" class="mt-3 text-xs text-emerald-400 hidden"></div>
-        </div>
-
-        <div class="bg-[#111113] border border-zinc-700 rounded-3xl p-5">
-          <div class="font-medium mb-3">Join Session</div>
-          <input id="join-addr" placeholder="192.168.x.x:48291" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-3 py-2 text-sm mb-2">
-          <button onclick="joinDuo('${session.id}', this)" class="w-full py-2 border border-zinc-600 rounded-2xl text-sm">Join</button>
-          <div id="join-info" class="mt-2 text-xs"></div>
-        </div>
-      </div>
-
-      <div class="mt-4 text-xs text-zinc-500">Use your local network IP. Both machines must be on the same network.</div>
-      <button onclick="switchView('sessions')" class="mt-4 text-xs text-zinc-400">Cancel &amp; go back</button>
-    </div>
-  `;
-}
-
-async function hostDuo(sessionId, btn) {
-  btn.disabled = true; btn.textContent = 'Starting host...';
-  try {
-    const res = await window.vibeforge.duoHost();
-    document.getElementById('host-info').classList.remove('hidden');
-    document.getElementById('host-info').innerHTML = `Hosting at <strong>${res.address}</strong><br>Waiting for connection... <button onclick="window.vibeforge.duoDisconnect(); switchView('share')" class="underline ml-1">Cancel</button>`;
-    showToast('Hosting started. Tell Nick the address.');
-  } catch (e) {
-    showToast('Host failed: ' + e.message);
-    btn.disabled = false; btn.textContent = 'Start Hosting';
-  }
-}
-
-async function joinDuo(sessionId, btn) {
-  const addr = document.getElementById('join-addr').value.trim();
-  if (!addr) { showToast('Enter address'); return; }
-  btn.disabled = true; btn.textContent = 'Joining...';
-  const res = await window.vibeforge.duoJoin(addr);
-  if (res.ok) {
-    document.getElementById('join-info').innerHTML = `Connected to ${addr}. <button onclick="startRecordingAfterLink('${sessionId}')" class="underline">Start session</button>`;
-    showToast('Joined successfully');
-  } else {
-    document.getElementById('join-info').textContent = 'Failed: ' + res.error;
-    btn.disabled = false; btn.textContent = 'Join';
-  }
-}
-
-async function startRecordingAfterLink(sessionId) {
-  // Simple room-like for now once linked
-  const sessions = await window.vibeforge.getSessions(currentProject.id);
-  const s = sessions.find(x => x.id === sessionId);
-  await renderLiveRoom(s);
+  // Store the session so the Share tab can start recording once linked
+  window._pendingDuoSession = session;
+  showToast('Use "Generate Room Code" to link, then recording will start.');
+  await switchView('share');
 }
 
 // === 6. SHARE WITH NICK QOL - clear instructions, copy, status, firewall note, troubleshooting, reveal received, send only when linked ===
 async function renderShareView(content, actionsEl) {
   actionsEl.innerHTML = '';
-  const status = await window.vibeforge.getPeerStatus();
+  const status = await getDuoStatus();
   const roomCode = status.roomCode || status.address || '';
   const isHosting = status.status === 'hosting';
   const isConnected = status.status === 'connected';
@@ -1901,7 +1849,7 @@ async function renderShareView(content, actionsEl) {
           ${isHosting ? `<div style="font-size:11px;color:#f59e0b;margin-top:8px;">Share this code — waiting for someone to join…</div>` : ''}
           ${isConnected ? `<div style="font-size:11px;color:#22c55e;margin-top:8px;">Connected!</div>` : ''}
         </div>
-        <button onclick="window.vibeforge.duoDisconnect().then(()=>switchView('share'))" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;">Disconnect</button>
+        <button onclick="duoDisconnectFromShare()" style="background:transparent;border:1px solid #3f3f46;color:#a1a1aa;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;">Disconnect</button>
       ` : `
         <button onclick="hostFromShare(this)" style="background:#6366f1;color:#fff;border:none;border-radius:10px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">Generate Room Code</button>
       `}
@@ -1917,6 +1865,14 @@ async function renderShareView(content, actionsEl) {
         <button onclick="doJoinFromShare(this)" style="background:#27272a;color:#e2e8f0;border:1px solid #3f3f46;border-radius:9px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;">Join</button>
       </div>
     </div>
+
+    <!-- Pending Duo Session: start recording once linked -->
+    ${isConnected && window._pendingDuoSession ? `
+    <div style="background:#0f2a1a;border:1px solid rgba(34,197,94,.35);border-radius:16px;padding:20px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:600;color:#86efac;margin-bottom:4px;">🎙️ Duo Session Ready</div>
+      <div style="font-size:11.5px;color:#71717a;margin-bottom:14px;">You're linked! Start the recording for "${esc(window._pendingDuoSession.title)}".</div>
+      <button onclick="(async()=>{ const s=window._pendingDuoSession; window._pendingDuoSession=null; await renderLiveRoom(s); })()" style="background:#16a34a;color:#fff;border:none;border-radius:9px;padding:9px 22px;font-size:13px;font-weight:600;cursor:pointer;">▶ Start Recording</button>
+    </div>` : ''}
 
     <!-- Send card (only when connected) -->
     ${isConnected ? `
@@ -1964,14 +1920,25 @@ async function renderShareView(content, actionsEl) {
 }
 
 window.copyPeerAddress = async function() {
-  const status = await window.vibeforge.getPeerStatus();
-  const addr = status.address || '';
+  const status = await getDuoStatus();
+  const addr = status.roomCode || status.address || '';
   if (addr) {
     navigator.clipboard.writeText(addr).then(() => showToast('Address copied: ' + addr));
   } else {
     showToast('No address yet (start Host)');
   }
 };
+
+async function getDuoStatus() {
+  if (window.vibePeer && window.vibePeer.getPeerStatus) return await window.vibePeer.getPeerStatus();
+  return await window.vibeforge.getPeerStatus();
+}
+
+async function duoDisconnectFromShare() {
+  if (window.vibePeer && window.vibePeer.duoDisconnect) await window.vibePeer.duoDisconnect();
+  else await window.vibeforge.duoDisconnect();
+  await switchView('share');
+}
 
 window.revealReceivedFolder = async function() {
   const p = await window.vibeforge.revealReceived();
@@ -1986,9 +1953,9 @@ window.revealSpecificReceived = function(p) {
 
 async function hostFromShare(btn) {
   btn.disabled = true;
-  btn.textContent = 'Starting…';
-  const res = await window.vibeforge.duoHost();
-  showToast('Hosting on ' + res.address);
+  btn.textContent = 'Starting...';
+  const res = window.vibePeer ? await window.vibePeer.duoHost() : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
+  if (res && res.ok) showToast('Room code ready: ' + (res.roomCode || res.address || '')); else showToast('Host failed: ' + (res ? res.error : 'unknown'));
   await switchView('share');
 }
 
@@ -1999,8 +1966,8 @@ async function doJoinFromShare(btn) {
   const addr = input ? input.value.trim() : '';
   if (!addr) { showToast('Paste an address first'); return; }
   btn.disabled = true;
-  btn.textContent = 'Joining…';
-  const res = await window.vibeforge.duoJoin(addr);
+  btn.textContent = 'Joining...';
+  const res = window.vibePeer ? await window.vibePeer.duoJoin(addr) : { ok: false, error: 'Peer manager not ready. Reload VibeForge and try again.' };
   if (res.ok) showToast('Connected to ' + addr);
   else showToast('Failed: ' + res.error);
   await switchView('share');
@@ -2012,7 +1979,7 @@ window.sendCurrentSessionNotes = async function() {
   const latest = sessions[0];
   if (latest) {
     const msg = JSON.stringify({ type: 'session-notes', title: latest.title, notes: latest.notes || '' });
-    const res = await window.vibeforge.peerSendText(msg);
+    const res = window.vibePeer ? await window.vibePeer.peerSendText(msg) : await window.vibeforge.peerSendText(msg);
     if (res && res.ok) {
       showToast('Sent session notes to peer');
     } else {
@@ -2025,7 +1992,7 @@ window.sendExportedBundle = async function() {
   if (!currentProject) return;
   const filePath = await window.vibeforge.pickFile();
   if (filePath) {
-    const res = await window.vibeforge.peerSendFile(filePath);
+    const res = window.vibePeer ? await window.vibePeer.peerSendFile(filePath) : await window.vibeforge.peerSendFile(filePath);
     if (res && res.ok) {
       showToast('Sent file to peer');
     } else {
@@ -2778,7 +2745,7 @@ window.transcribeSession = async function(sessionId, options = {}) {
   if (!options.silent) showToast('Transcribing locally with Whisper... this can take a bit for long recordings.');
   try {
     const bytes = await window.vibeforge.readFileBuffer(s.audio_path);
-    if (!bytes) { if (!options.silent) showToast('Recording file not found on disk.'); return ''; }
+    if (!bytes) { if (!options.silent) showToast('Recording file not found. Is the host running with the same code?'); return ''; }
     const wav = await audioBytesToWav16k(bytes);
     // appendToNotes only when NOT part of auto-process (auto-process passes the text to the
     // brain directly, so we don't also dump a [Whisper transcript] block into notes).
@@ -3024,7 +2991,7 @@ async function checkGitStatus(btn) {
   if (btn) btn.textContent = 'Checking...';
   const r = await window.vibeforge.checkGit();
   const el = document.getElementById('gh-status');
-  if (el) el.textContent = r.ok ? ('Git: ' + r.version) : ('Git not found: ' + r.error);
+  if (el) el.textContent = r.ok ? ('Git: ' + r.version) : ('Git not found. Is the host running with the same code?' + r.error);
   if (btn) btn.textContent = 'Check Git Installed';
 }
 
@@ -3141,8 +3108,7 @@ window.saveAllSettings = async function() {
   showToast('Settings saved');
 };
 
-// Pick a model that is actually pulled in Ollama. Prevents the "HTTP 404 model not found"
-// crash when the saved ollama_model setting doesn't match an installed model.
+// Pick a model that is actually pulled in Ollama. Prevents the "HTTP 404 model not found. Is the host running with the same code?'t match an installed model.
 // Returns { ok, model } or { ok:false, reason: 'offline' | 'no-model' }.
 async function resolveOllamaModel() {
   const status = await window.vibeforge.ollamaStatus();
@@ -3302,7 +3268,7 @@ async function runSessionBrain(sessionId, opts = {}) {
 
   const sessions = await window.vibeforge.getSessions(currentProject.id);
   const s = sessions.find(x => x.id === sessionId);
-  if (!s) throw new Error('Session not found');
+  if (!s) throw new Error('Session not found. Is the host running with the same code?');
 
   // Prefer the clean full-Whisper transcript (passed in by the caller) over the messy
   // real-time captions. Fall back to notes/typed content if no transcript was produced.
@@ -3675,6 +3641,151 @@ async function refreshServiceStatus() {
     else setDot('dot-whisper', 'gray', 'Whisper: not set up — click to install in AI Tools');
   } catch (e) { setDot('dot-whisper', 'gray', 'Whisper: not set up'); }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// RENDERER-SIDE PEER MANAGER (v0.4.0)
+// PeerJS needs WebRTC which ONLY exists in Chromium (this renderer),
+// NOT in Node.js/main. This overrides the IPC stubs so Host and Join
+// actually work. Loaded after PeerJS CDN script in index.html.
+// ════════════════════════════════════════════════════════════════════
+(function initPeerManager() {
+  let _peer = null, _conn = null, _peerJsId = null;
+
+  function _setPeerStatus(data) {
+    peerStatus = data;
+    if (currentView === 'share') {
+      const c = document.getElementById('main-content');
+      const a = document.getElementById('view-actions');
+      if (c && a) renderShareView(c, a);
+    }
+  }
+
+  function _cleanup() {
+    if (_conn) { try { _conn.close(); } catch(e){} _conn = null; }
+    if (_peer) { try { _peer.destroy(); } catch(e){} _peer = null; }
+    _peerJsId = null;
+    _setPeerStatus({ status: 'offline' });
+  }
+
+  function _wireConn(conn, role) {
+    _conn = conn;
+    conn.on('open', () => {
+      _setPeerStatus({ status: 'connected', roomCode: _peerJsId || conn.peer, address: conn.peer, type: role });
+      showToast('\u2705 Duo Link connected!');
+    });
+    conn.on('data', (raw) => {
+      if (typeof raw === 'string') {
+        try {
+          const obj = JSON.parse(raw);
+          if (obj && obj.type === 'session-notes') {
+            receivedItems.push({ type: 'notes', title: obj.title, content: obj.notes });
+            _setPeerStatus(peerStatus);
+            showToast('Received session notes from peer');
+            return;
+          }
+        } catch(e) {}
+        showToast('Message: ' + String(raw).slice(0, 60));
+      } else if (raw && raw.type === 'file-data') {
+        window.vibeforge.saveReceivedFile(raw.name, raw.data).then(res => {
+          if (res && res.ok) {
+            receivedItems.push({ type: 'file', name: raw.name, path: res.path });
+            _setPeerStatus(peerStatus);
+            showToast('File received: ' + raw.name);
+          }
+        });
+      }
+    });
+    conn.on('close', () => { _cleanup(); showToast('Duo Link disconnected'); });
+    conn.on('error', (err) => { showToast('Link error: ' + err.message); });
+  }
+
+  function _makeCode() {
+    const w = ['forge','vibe','link','sync','beam','cast','wave','pulse','flow','mesh'];
+    return w[Math.floor(Math.random() * w.length)] + '-' + (1000 + Math.floor(Math.random() * 9000));
+  }
+
+  window.vibePeer = {};
+
+  window.vibePeer.duoHost = () => {
+    if (typeof Peer === 'undefined') {
+      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Share after the app finishes loading.' });
+    }
+    return new Promise((resolve) => {
+      _cleanup();
+      const code = _makeCode();
+      _peerJsId = code;
+      _setPeerStatus({ status: 'connecting', roomCode: code });
+      const peer = new Peer(code, { debug: 0 });
+      _peer = peer;
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      peer.on('open', (id) => {
+        _peerJsId = id;
+        _setPeerStatus({ status: 'hosting', roomCode: id, address: id });
+        done({ ok: true, roomCode: id });
+      });
+      peer.on('connection', (conn) => _wireConn(conn, 'host'));
+      peer.on('error', (err) => {
+        _setPeerStatus({ status: 'error', error: err.message });
+        done({ ok: false, error: err.message });
+      });
+      setTimeout(() => done({ ok: false, error: 'Timed out. Check internet connection.' }), 12000);
+    });
+  };
+
+  window.vibePeer.duoJoin = (roomCode) => {
+    if (typeof Peer === 'undefined') {
+      return Promise.resolve({ ok: false, error: 'PeerJS not loaded yet. Use Settings/Share after the app finishes loading.' });
+    }
+    return new Promise((resolve) => {
+      _cleanup();
+      if (!roomCode || !roomCode.trim()) return resolve({ ok: false, error: 'Room code required' });
+      const code = roomCode.trim().toLowerCase();
+      _setPeerStatus({ status: 'connecting', roomCode: code });
+      const peer = new Peer({ debug: 0 });
+      _peer = peer;
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      peer.on('open', () => {
+        const conn = peer.connect(code, { reliable: true, serialization: 'json' });
+        _wireConn(conn, 'client');
+        conn.on('open', () => done({ ok: true, roomCode: code }));
+        conn.on('error', (err) => done({ ok: false, error: err.message }));
+        setTimeout(() => done({ ok: false, error: '"' + code + '" not found. Is the host running with the same code?' }), 15000);
+      });
+      peer.on('error', (err) => done({ ok: false, error: err.message }));
+    });
+  };
+
+  window.vibePeer.duoDisconnect = () => {
+    _cleanup();
+    showToast('Disconnected');
+    return Promise.resolve(true);
+  };
+
+  window.vibePeer.getPeerStatus = () => Promise.resolve(peerStatus);
+
+  window.vibePeer.peerSendText = (text) => {
+    if (_conn && _conn.open) {
+      try { _conn.send(text); return Promise.resolve({ ok: true }); }
+      catch(e) { return Promise.resolve({ ok: false, error: e.message }); }
+    }
+    return Promise.resolve({ ok: false, error: 'Not connected' });
+  };
+
+  window.vibePeer.peerSendFile = async (filePath) => {
+    if (!_conn || !_conn.open) return { ok: false, error: 'Not connected' };
+    try {
+      const buf = await window.vibeforge.readFileBuffer(filePath);
+      if (!buf) return { ok: false, error: 'Could not read file' };
+      const name = filePath.split(/[\\/]/).pop();
+      _conn.send({ type: 'file-data', name, data: Array.from(new Uint8Array(buf)) });
+      return { ok: true };
+    } catch(e) { return { ok: false, error: e.message }; }
+  };
+
+  console.log('[VibeForge] Renderer-side Peer manager ready (v0.4.0)');
+})();
 
 // Boot
 window.onload = init;

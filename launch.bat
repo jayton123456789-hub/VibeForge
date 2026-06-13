@@ -8,17 +8,24 @@ if not exist node_modules (
   call npm install
 )
 
-REM Rebuild the native module (better-sqlite3) only when needed, not every launch.
-REM A marker file records that the rebuild succeeded, so later launches skip it.
+REM Rebuild the native module (better-sqlite3) only when it is actually missing.
+REM Do NOT rebuild every launch: Windows locks better_sqlite3.node while Electron is open,
+REM which causes EPERM unlink crashes. If the native file exists, launch immediately.
 if not exist node_modules\.vibeforge-rebuilt (
-  echo Preparing native modules one time...
-  call npm run rebuild
-  if errorlevel 1 (
-    echo Rebuild failed. See messages above.
-    pause
-    exit /b 1
+  if exist node_modules\better-sqlite3\build\Release\better_sqlite3.node (
+    echo Native modules already present. Skipping rebuild.
+    echo done > node_modules\.vibeforge-rebuilt
+  ) else (
+    echo Preparing native modules one time...
+    taskkill /IM electron.exe /F >nul 2>nul
+    call npm run rebuild
+    if errorlevel 1 (
+      echo Rebuild failed. Close all VibeForge/Electron windows and run launch.bat again.
+      pause
+      exit /b 1
+    )
+    echo done > node_modules\.vibeforge-rebuilt
   )
-  echo done > node_modules\.vibeforge-rebuilt
 )
 
 REM Launch using the local Electron binary directly - no network, no npx overhead.

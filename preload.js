@@ -57,7 +57,8 @@ const api = {
   // File pick (for future share/assets)
   pickFile: () => ipcRenderer.invoke('pick-file'),
 
-  // Duo / Share real link
+  // Duo / Share (IPC stubs — real PeerJS connection is managed in renderer.js
+  // where WebRTC is available; these just satisfy any legacy call sites)
   duoHost: () => ipcRenderer.invoke('duo-host'),
   duoJoin: (address) => ipcRenderer.invoke('duo-join', address),
   duoDisconnect: () => ipcRenderer.invoke('duo-disconnect'),
@@ -121,7 +122,13 @@ const api = {
   readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   setupOpenSourceWhisper: () => ipcRenderer.invoke('setup-open-source-whisper'),
   onWhisperSetupLog: (cb) => ipcRenderer.on('whisper-setup-log', (_e, line) => cb(line)),
-  getScreenSources: () => ipcRenderer.invoke('get-screen-sources')
+  getScreenSources: () => ipcRenderer.invoke('get-screen-sources'),
+
+  // Renderer-side PeerJS: call main only to persist received files (needs Node.js fs)
+  saveReceivedFile: (name, uint8arr) => ipcRenderer.invoke('save-received-file', { name, uint8arr }),
+
+  // App version for display
+  getAppVersion: () => ipcRenderer.invoke('get-app-version')
 };
 
 contextBridge.exposeInMainWorld('vibeforge', api);
