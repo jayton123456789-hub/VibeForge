@@ -1119,11 +1119,10 @@ function registerIpc() {
     }
   });
 
-  // Whisper status for the green-lights (engine + model both present)
+  // Whisper status for the green-lights (engine + model both present, model not truncated)
   ipcMain.handle('whisper-status', () => {
     const cli = findWhisperCli();
-    const model = getWhisperModelPath();
-    return { ready: !!(cli && fs.existsSync(model)) };
+    return { ready: !!(cli && whisperModelOk()) };
   });
 
   
@@ -1284,13 +1283,45 @@ function registerIpc() {
     return path.join(getWhisperDir(), 'ggml-base.en.bin');
   }
 
+  // ggml-base.en is ~142 MB. Anything much smaller is a truncated/broken download.
+  const WHISPER_MODEL_MIN_BYTES = 100 * 1024 * 1024;
+  function whisperModelOk() {
+    const p = getWhisperModelPath();
+    try { return fs.existsSync(p) && fs.statSync(p).size >= WHISPER_MODEL_MIN_BYTES; }
+    catch (e) { return false; }
+  }
+  function whisperModelSize() {
+    const p = getWhisperModelPath();
+    try { return fs.existsSync(p) ? fs.statSync(p).size : 0; } catch (e) { return 0; }
+  }
+
+  // Download the model atomically: to a .part file, verify size, then rename into place.
+  // An interrupted download can therefore never strand a broken model that looks installed.
+  async function downloadWhisperModelAtomic(onProgress) {
+    const dir = getWhisperDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const finalPath = getWhisperModelPath();
+    const partPath = finalPath + '.part';
+    try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch (e) {}
+    await downloadFile(WHISPER_MODEL_URL, partPath, onProgress);
+    let size = 0;
+    try { size = fs.statSync(partPath).size; } catch (e) {}
+    if (size < WHISPER_MODEL_MIN_BYTES) {
+      try { fs.unlinkSync(partPath); } catch (e) {}
+      throw new Error(`model download incomplete (${Math.round(size/1048576)} MB)`);
+    }
+    try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch (e) {}
+    fs.renameSync(partPath, finalPath);
+    return finalPath;
+  }
+
   // Transcribe a 16kHz mono WAV buffer sent from the renderer.
   // Used both for live caption chunks and full post-session transcription.
   ipcMain.handle('transcribe-wav', async (e, { wav, sessionId, appendToNotes, live }) => {
     const cli = findWhisperCli();
     const model = getWhisperModelPath();
-    if (!cli || !fs.existsSync(model)) {
-      return { ok: false, error: 'Whisper not set up. One click in Settings > AI Tools installs it (~150 MB, one time).' };
+    if (!cli || !whisperModelOk()) {
+      return { ok: false, error: 'Whisper not set up (or speech model incomplete). Settings → AI Tools → Repair/Setup.' };
     }
     const tempDir = path.join(app.getPath('userData'), 'temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
@@ -1385,10 +1416,10 @@ function registerIpc() {
         log('Engine ready: ' + cli + '\n');
       }
 
-      if (!fs.existsSync(modelPath)) {
+      if (!whisperModelOk()) {
         log('Downloading speech model ggml-base.en (~142 MB, one time)...\n');
         let lastShown = -10;
-        await downloadFile(WHISPER_MODEL_URL, modelPath, (pct) => {
+        await downloadWhisperModelAtomic((pct) => {
           if (pct >= lastShown + 10) { lastShown = pct; log(`  model download: ${pct}%\n`); }
         });
         log('Model ready.\n');
@@ -1553,14 +1584,36 @@ function registerIpc() {
     return dist;
   });
 
-  // === Transcription / Whisper status check ===
+  // === Transcription / Whisper status check (granular: engine vs model, with model size) ===
   ipcMain.handle('whisper-check', async () => {
     const cli = findWhisperCli();
-    const model = getWhisperModelPath();
-    const modelOk = fs.existsSync(model);
-    if (cli && modelOk) return { configured: true, path: cli, model };
-    if (cli && !modelOk) return { configured: false, message: 'Engine installed but model missing — run setup again' };
-    return { configured: false, message: 'Not installed — run the one-click setup' };
+    const engine = !!cli;
+    const model = whisperModelOk();
+    const modelBytes = whisperModelSize();
+    const configured = engine && model;
+    let message;
+    if (configured) message = 'Ready';
+    else if (engine && !model) message = modelBytes > 0
+      ? 'Speech model is incomplete — click Repair to re-download it'
+      : 'Engine installed, speech model missing — click Repair';
+    else message = 'Not installed — run the one-click setup';
+    return { configured, engine, model, path: cli || '', modelPath: getWhisperModelPath(), modelBytes, message };
+  });
+
+  // Repair = re-download ONLY the ~142 MB model (engine already present). Atomic.
+  ipcMain.handle('whisper-repair-model', async () => {
+    const log = (m) => mainWindow && mainWindow.webContents.send('whisper-setup-log', m);
+    try {
+      log('Re-downloading speech model (~142 MB)...\n');
+      let last = -10;
+      await downloadWhisperModelAtomic((pct) => { if (pct >= last + 10) { last = pct; log(`  model: ${pct}%\n`); } });
+      setSetting('whisper_model', getWhisperModelPath());
+      log('\n=== Model repaired. Transcription works again. ===\n');
+      return { ok: true };
+    } catch (e) {
+      log('\nRepair failed: ' + e.message + '\n');
+      return { ok: false, error: e.message };
+    }
   });
 
   ipcMain.handle('whisper-open-help', () => {
@@ -1702,7 +1755,7 @@ async function runFirstRunSetup() {
   // Check Whisper
   const whisperCli = findWhisperCli();
   const whisperModel = getWhisperModelPath();
-  const whisperReady = !!(whisperCli && fs.existsSync(whisperModel));
+  const whisperReady = !!(whisperCli && whisperModelOk());
 
   splashStep('deps', 'done', `Ollama installed: ${ollamaInstalled}${ollamaInstalled ? ` (${ollamaCheck.exe})` : ''}, running: ${ollamaRunning}, model ready: ${modelPulled}, Whisper ready: ${whisperReady}\n`);
   await sleep(300);
@@ -1803,9 +1856,9 @@ async function runFirstRunSetup() {
         cli = findWhisperCli();
         if (!cli) throw new Error('whisper-cli.exe not found after extraction');
       }
-      if (!fs.existsSync(modelPath)) {
+      if (!whisperModelOk()) {
         splashStep('whisper', 'active', 'Downloading speech model (~142 MB)…\n');
-        await downloadFile(WHISPER_MODEL_URL, modelPath, pct => {
+        await downloadWhisperModelAtomic(pct => {
           if (pct % 10 === 0) splashStep('whisper', 'active', `  model: ${pct}%\n`);
         });
       }

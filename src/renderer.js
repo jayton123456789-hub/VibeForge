@@ -1997,14 +1997,23 @@ async function renderLiveRoom(session) {
     try {
       // Clean, reliable capture. echoCancellation also stops any speaker bleed from
       // becoming a feedback loop; noiseSuppression + autoGainControl keep speech legible.
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
+      // Honor the mic chosen in Settings → AI Tools (falls back to the system default).
+      const _audioConstraints = {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      };
+      try {
+        const _st = await window.vibeforge.getSettings();
+        if (_st && _st.audio_device_id) _audioConstraints.deviceId = { exact: _st.audio_device_id };
+      } catch (e) {}
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: _audioConstraints })
+        .catch(async (err) => {
+          // Chosen device unavailable (unplugged?) — fall back to the default mic.
+          delete _audioConstraints.deviceId;
+          return navigator.mediaDevices.getUserMedia({ audio: _audioConstraints });
+        });
       // THE RECORDING: mic audio only, one MediaRecorder, never restarted or combined.
       // This is the audio of record and nothing else is allowed to touch it.
       audioChunks = [];
@@ -3197,16 +3206,22 @@ async function renderSettingsView(content) {
 
         <div class="bg-[#111113] border border-zinc-800 rounded-3xl p-5">
           <div class="text-lg font-semibold mb-1">Transcription (Whisper, fully local)</div>
-          <div class="text-xs text-zinc-400 mb-3">Powered by whisper.cpp - no Python, no dependencies. One-click setup downloads the engine + speech model (~150 MB, one time). After that: live captions during recording + full transcription of any saved session, all offline.</div>
+          <div class="text-xs text-zinc-400 mb-3">Powered by whisper.cpp - no Python, no dependencies. Runs entirely offline once the engine + speech model are installed.</div>
 
-          <input id="set-whisper" value="${settings.whisper_path || ''}" placeholder="Engine path (set automatically after setup)" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-base mb-2" readonly>
-          <div class="flex gap-2 mb-2">
-            <button onclick="checkWhisper()" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">Check Setup</button>
-            <button onclick="window.openWhisperCpp()" class="flex-1 py-2.5 bg-zinc-800 rounded-2xl text-sm">About whisper.cpp</button>
+          <input id="set-whisper" value="${settings.whisper_path || ''}" type="hidden">
+          <!-- Status-driven block: shows engine/model state and collapses to "ready" when both present -->
+          <div id="whisper-panel"><div class="text-xs text-zinc-500">Checking Whisper status…</div></div>
+          <div id="whisper-setup-log" class="hidden h-20 overflow-auto bg-black/40 text-[10px] p-2 rounded font-mono mt-2"></div>
+          <div id="whisper-status" class="text-[10px] text-zinc-500 mt-1"></div>
+
+          <div class="mt-4 pt-4 border-t border-zinc-800">
+            <div class="text-sm font-semibold mb-1">Microphone</div>
+            <div class="text-xs text-zinc-400 mb-2">Which input the app records from. Default follows your Windows default mic.</div>
+            <select id="mic-select" onchange="onMicChange()" class="w-full bg-zinc-900 border border-zinc-700 rounded-2xl px-4 py-3 text-sm">
+              <option value="">System default microphone</option>
+            </select>
+            <div id="mic-active" class="text-[10px] text-emerald-400 mt-1.5">Recording from: system default</div>
           </div>
-          <button onclick="setupOpenSourceWhisper(this)" class="w-full py-2.5 bg-emerald-600 rounded-2xl text-sm font-medium mb-2">One-click Whisper Setup (~150 MB one-time download)</button>
-          <div id="whisper-setup-log" class="h-20 overflow-auto bg-black/40 text-[10px] p-2 rounded font-mono"></div>
-          <div id="whisper-status" class="text-[10px] text-zinc-500 mt-1">After setup: live captions in Room sessions + a Transcribe button on any recording. Fully offline.</div>
         </div>
       </div>
     `;
@@ -3290,10 +3305,88 @@ async function renderSettingsView(content) {
           }
         }
       } catch(e){}
+      // Populate the status-driven Whisper panel + the microphone picker.
+      try { await refreshWhisperPanel(); } catch (e) {}
+      try { await populateMicList(); } catch (e) {}
     }, 60);
   }
 
 }
+
+// ── Whisper panel: status-driven, collapses when ready, repair when model missing ──
+async function refreshWhisperPanel() {
+  const panel = document.getElementById('whisper-panel');
+  if (!panel) return;
+  let c;
+  try { c = await window.vibeforge.whisperCheck(); } catch (e) { c = { configured: false, message: 'status check failed' }; }
+  const mb = c.modelBytes ? Math.round(c.modelBytes / 1048576) : 0;
+  const row = (ok, label, detail) =>
+    `<div class="flex items-center gap-2 text-sm py-0.5"><span class="${ok ? 'text-emerald-400' : 'text-zinc-500'}">${ok ? '✓' : '○'}</span><span class="${ok ? 'text-zinc-200' : 'text-zinc-400'}">${label}</span>${detail ? `<span class="text-[10px] text-zinc-500 ml-1">${detail}</span>` : ''}</div>`;
+  let html = `<div class="rounded-2xl border ${c.configured ? 'border-emerald-700/40 bg-emerald-500/5' : 'border-zinc-700 bg-zinc-950/40'} p-3 mb-2">
+    ${row(!!c.engine, 'Speech engine', c.engine ? 'whisper.cpp' : 'not installed')}
+    ${row(!!c.model, 'Speech model', c.model ? `ggml-base.en · ${mb} MB` : (mb > 0 ? `incomplete (${mb} MB)` : 'missing'))}
+  </div>`;
+  if (c.configured) {
+    html += `<div class="flex gap-2">
+      <button onclick="refreshWhisperPanel()" class="flex-1 py-2 bg-zinc-800 rounded-2xl text-sm">Re-check</button>
+      <button onclick="window.vibeforge.whisperOpenHelp()" class="flex-1 py-2 bg-zinc-800 rounded-2xl text-sm">About whisper.cpp</button>
+    </div>`;
+  } else if (c.engine && !c.model) {
+    html += `<button onclick="repairWhisperModel(this)" class="w-full py-2.5 bg-amber-600 hover:bg-amber-500 rounded-2xl text-sm font-medium">Repair: re-download speech model (~142 MB)</button>`;
+  } else {
+    html += `<button onclick="setupOpenSourceWhisper(this)" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-2xl text-sm font-medium">One-click Whisper Setup (~150 MB, one time)</button>`;
+  }
+  panel.innerHTML = html;
+}
+
+window.repairWhisperModel = async function(btn) {
+  const log = document.getElementById('whisper-setup-log');
+  if (log) { log.classList.remove('hidden'); log.textContent = 'Repairing speech model...\n'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Repairing...'; }
+  const res = await window.vibeforge.whisperRepairModel();
+  if (res && res.ok) { showToast('Whisper model repaired — transcription works again'); }
+  else { showToast('Repair failed: ' + (res ? res.error : 'unknown')); }
+  await refreshWhisperPanel();
+  if (typeof refreshServiceStatus === 'function') refreshServiceStatus();
+};
+
+// ── Microphone picker ──────────────────────────────────────────────────────
+async function populateMicList() {
+  const sel = document.getElementById('mic-select');
+  const active = document.getElementById('mic-active');
+  if (!sel) return;
+  try {
+    // Needs an active permission to see device labels; if not granted yet, labels are blank.
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    let mics = devices.filter(d => d.kind === 'audioinput');
+    if (mics.length && !mics[0].label) {
+      // Prompt once for permission so we can show real names, then re-enumerate.
+      try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); } catch (e) {}
+      devices = await navigator.mediaDevices.enumerateDevices();
+      mics = devices.filter(d => d.kind === 'audioinput');
+    }
+    const settings = await window.vibeforge.getSettings();
+    const savedId = settings.audio_device_id || '';
+    sel.innerHTML = '<option value="">System default microphone</option>' +
+      mics.map(m => `<option value="${m.deviceId}" ${m.deviceId === savedId ? 'selected' : ''}>${esc(m.label || ('Microphone ' + m.deviceId.slice(0, 6)))}</option>`).join('');
+    const cur = mics.find(m => m.deviceId === savedId);
+    if (active) active.textContent = 'Recording from: ' + (cur ? cur.label : 'system default');
+  } catch (e) {
+    if (active) active.textContent = 'Could not list microphones: ' + e.message;
+  }
+}
+
+window.onMicChange = async function() {
+  const sel = document.getElementById('mic-select');
+  const active = document.getElementById('mic-active');
+  if (!sel) return;
+  const id = sel.value;
+  const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : 'system default';
+  await window.vibeforge.saveSetting('audio_device_id', id);
+  await window.vibeforge.saveSetting('audio_device_label', id ? label : '');
+  if (active) active.textContent = 'Recording from: ' + (id ? label : 'system default');
+  showToast('Microphone set: ' + (id ? label : 'system default'));
+};
 
 // Helper so the tab buttons can switch and re-render just the pane
 window.switchSettingsTab = async function(tab, btn) {
@@ -3428,17 +3521,19 @@ window.transcribeSession = async function(sessionId, options = {}) {
 
 window.setupOpenSourceWhisper = async function(btn) {
   const logEl = document.getElementById('whisper-setup-log');
+  if (logEl) { logEl.classList.remove('hidden'); logEl.textContent = 'Setting up Whisper (whisper.cpp engine + speech model, ~150 MB one-time download)...\nNo Python, no dependencies - works offline after this.\n'; }
   if (btn) btn.disabled = true;
-  if (logEl) logEl.textContent = 'Setting up Whisper (whisper.cpp engine + speech model, ~150 MB one-time download)...\nNo Python, no dependencies - works offline after this.\n';
 
   const res = await window.vibeforge.setupOpenSourceWhisper();
   if (res && res.ok) {
     if (logEl) logEl.textContent += res.alreadySetup ? '\nAlready installed and ready.\n' : '\nSetup complete. Transcription + live captions are ready.\n';
     showToast('Whisper ready - transcription works fully offline now.');
-    setTimeout(() => switchView('settings'), 500);
+    if (typeof refreshWhisperPanel === 'function') await refreshWhisperPanel();
+    if (typeof refreshServiceStatus === 'function') refreshServiceStatus();
   } else {
     if (logEl) logEl.textContent += '\nSetup failed: ' + (res ? res.error : 'unknown') + '\nCheck your internet connection and retry.\n';
     showToast('Whisper setup failed - see the log in AI Tools.');
+    if (typeof refreshWhisperPanel === 'function') await refreshWhisperPanel();
   }
   if (btn) btn.disabled = false;
 };

@@ -1,6 +1,6 @@
 {
   "name": "vibeforge",
-  "version": "0.4.8",
+  "version": "0.5.0",
   "description": "Local AI Creative Session Studio - minimal working version",
   "main": "main.js",
   "scripts": {

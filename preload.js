@@ -103,6 +103,7 @@ const api = {
   checkAppUpdate: (data) => ipcRenderer.invoke('check-app-update', data),
 
   whisperCheck: (p) => ipcRenderer.invoke('whisper-check', p),
+  whisperRepairModel: () => ipcRenderer.invoke('whisper-repair-model'),
   whisperOpenHelp: () => ipcRenderer.invoke('whisper-open-help'),
 
   onOllamaLog: (cb) => ipcRenderer.on('ollama-log', (_e, line) => cb(line)),
