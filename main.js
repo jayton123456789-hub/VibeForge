@@ -1834,9 +1834,14 @@ function createSplash() {
   if (isUpdateMode) return;
   try {
     splashWindow = new BrowserWindow({
-      width: 560, height: 640, frame: false, transparent: true, resizable: false,
-      center: true, alwaysOnTop: false, skipTaskbar: true, show: false,
-      backgroundColor: '#00000000',
+      // IMPORTANT: this window hosts the first-run setup wizard, which on a fresh
+      // machine is the ONLY window that opens. It MUST be visible. A transparent +
+      // skipTaskbar frameless window renders invisibly on many GPU/driver setups
+      // (the "it launches for the dev but nobody else" bug). So: opaque, solid
+      // background, real taskbar button, surfaced on top.
+      width: 560, height: 640, frame: false, transparent: false, resizable: false,
+      center: true, alwaysOnTop: true, skipTaskbar: false, show: false,
+      backgroundColor: '#0a0a0b',
       webPreferences: {
         preload: path.join(__dirname, 'src/splash-preload.js'),
         contextIsolation: true,
@@ -1844,8 +1849,11 @@ function createSplash() {
       }
     });
     splashWindow.loadFile(path.join(__dirname, 'src/splash.html'));
-    splashWindow.once('ready-to-show', () => { if (splashWindow) splashWindow.show(); });
-    setTimeout(() => { if (splashWindow) splashWindow.show(); }, 1200);
+    const showSplash = () => { try { if (splashWindow) { splashWindow.show(); splashWindow.focus(); } } catch (e) {} };
+    splashWindow.once('ready-to-show', showSplash);
+    // Safety nets: force-show even if ready-to-show never fires (compositing hangs).
+    setTimeout(showSplash, 800);
+    setTimeout(showSplash, 2500);
     splashWindow.on('closed', () => { splashWindow = null; });
   } catch (e) { splashWindow = null; }
 }
@@ -2037,7 +2045,15 @@ app.whenReady().then(() => {
   if (!isUpdateMode) {
     // First-run shows the dependency setup wizard first. Normal launch opens immediately.
     firstRunPending = needsFirstRunSetup;
-    if (!firstRunPending) createWindow();
+    if (!firstRunPending) {
+      createWindow();
+    } else if (!splashWindow) {
+      // Safety: the wizard window failed to be created. Never strand the user with no
+      // window — open the main app directly (they can run setup from Settings → AI Tools).
+      firstRunPending = false;
+      if (!db) { try { initDb(); } catch (e) {} }
+      createWindow();
+    }
   }
   // Note: update mode process is headless replacer (scheduled above), no window.
 
